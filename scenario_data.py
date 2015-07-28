@@ -42,7 +42,8 @@ except psycopg2.OperationalError:
 
 # NOTE: the code below could be made more generic, e.g., a list of
 # table names and queries, which are then processed at the end.
-# But this arrangement is easier to debug.
+# But that would be harder to debug, and wouldn't allow for ad hoc 
+# calculations or writing .dat files (which are used for a few parameters)
 
 def write_tables(**args):
     #########################
@@ -82,11 +83,17 @@ def write_tables(**args):
     # financials
 
     # this just uses a dat file, not a table (and the values are not in a database for now)
-    with open('financials.dat', 'w') as f:
-        f.writelines([
-            'param ' + name + ' := ' + str(args[name]) + ';\n' 
-            for name in ['base_financial_year', 'interest_rate', 'discount_rate']
-        ])
+    # print 'writing financials.dat'
+    # with open('financials.dat', 'w') as f:
+    #     f.writelines([
+    #         'param ' + name + ' := ' + str(args[name]) + ';\n' 
+    #         for name in ['base_financial_year', 'interest_rate', 'discount_rate']
+    #     ])
+    write_dat_file(
+        'financials.dat',
+        ['base_financial_year', 'interest_rate', 'discount_rate'],
+        args
+    )
 
     #########################
     # load_zones
@@ -151,11 +158,13 @@ def write_tables(**args):
     # TODO: get monthly fuel costs from Karl Jandoc spreadsheet
 
     write_table('fuel_cost.tab', """
-        SELECT load_zone, fuel_type as fuel, period, price_mmbtu as fuel_cost 
-            FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
-            WHERE load_zone in %(load_zones)s 
-                AND fuel_scen_id = %(fuel_scen_id)s
-                AND p.time_sample = %(time_sample)s;
+        SELECT load_zone, fuel_type as fuel, period, 
+            price_mmbtu * power(1.0+%(inflation_rate)s, %(base_financial_year)s-c.year) as fuel_cost 
+        FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
+        WHERE load_zone in %(load_zones)s 
+            AND fuel_scen_id = %(fuel_scen_id)s
+            AND p.time_sample = %(time_sample)s
+        ORDER BY 1, 2, 3;
     """, args)
 
 
@@ -385,28 +394,32 @@ def write_tables(**args):
     #########################
     # project.dispatch
 
-    write_table('variable_capacity_factors.tab', """
-        SELECT 
-            concat_ws('_', load_zone, technology, site, orientation) as "PROJECT",
-            study_hour as timepoint,
-            cap_factor as proj_max_capacity_factor
-        FROM generator_costs g JOIN cap_factor c USING (technology)
-            JOIN study_hour h using (date_time)
-        WHERE load_zone in %(load_zones)s and time_sample = %(time_sample)s
-            AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
-        UNION 
-        SELECT 
-            c.project_id as "PROJECT", 
-            study_hour as timepoint, 
-            cap_factor as proj_max_capacity_factor
-        FROM existing_plants p JOIN existing_plants_cap_factor c USING (project_id)
-            JOIN study_hour h USING (date_time)
-        WHERE h.date_time = c.date_time 
-            AND c.load_zone in %(load_zones)s
-            AND h.time_sample = %(time_sample)s
-            AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
-        ORDER BY 1, 2
-    """, args)
+    # skip this step if the user specifies "skip_cf" in the arguments (to speed up execution)
+    if args.get("skip_cf", False):
+        print "SKIPPING variable_capacity_factors.tab"
+    else:
+        write_table('variable_capacity_factors.tab', """
+            SELECT 
+                concat_ws('_', load_zone, technology, site, orientation) as "PROJECT",
+                study_hour as timepoint,
+                cap_factor as proj_max_capacity_factor
+            FROM generator_costs g JOIN cap_factor c USING (technology)
+                JOIN study_hour h using (date_time)
+            WHERE load_zone in %(load_zones)s and time_sample = %(time_sample)s
+                AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+            UNION 
+            SELECT 
+                c.project_id as "PROJECT", 
+                study_hour as timepoint, 
+                cap_factor as proj_max_capacity_factor
+            FROM existing_plants p JOIN existing_plants_cap_factor c USING (project_id)
+                JOIN study_hour h USING (date_time)
+            WHERE h.date_time = c.date_time 
+                AND c.load_zone in %(load_zones)s
+                AND h.time_sample = %(time_sample)s
+                AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+            ORDER BY 1, 2
+        """, args)
 
 
     #########################
@@ -500,6 +513,66 @@ def write_tables(**args):
     # --- Not used ---
 
 
+    #########################
+    # batteries
+    # TODO: put these data in a database and write a .tab file instead
+    write_dat_file(
+        'batteries.dat',
+        [x for x in args if x.startswith('battery_')],
+        args
+    )
+
+    #########################
+    # EV annual energy consumption
+    if 'ev_scen_id' in args:
+        write_table('ev_energy.tab', """
+            SELECT load_zone as "LOAD_ZONE", period, ev_gwh AS ev_gwh_annual
+            FROM ev_adoption a JOIN study_periods p on a.year = p.period
+            WHERE load_zone in %(load_zones)s
+                AND time_sample = %(time_sample)s
+                AND ev_scen_id = %(ev_scen_id)s
+        """, args)
+
+    #########################
+    # pumped hydro
+    # TODO: put these data in a database and write a .tab file instead
+    write_dat_file(
+        'pumped_hydro.dat',
+        [x for x in args if x.startswith('pumped_hydro_')],
+        args
+    )
+
+
+def write_dat_file(output_file, args_to_write, arguments):
+    """ write a simple .dat file with the arguments specified in args_to_write, 
+    drawn from the arguments dictionary"""
+    if any(arg in arguments for arg in args_to_write):
+        print "Writing {file} ...".format(file=output_file),
+        sys.stdout.flush()  # display the part line to the user
+        start=time.time()
+
+        with open(output_file, 'w') as f:
+            f.writelines([
+                'param ' + name + ' := ' + str(arguments[name]) + ';\n' 
+                for name in args_to_write if name in arguments
+            ])
+        
+        print "time taken: {dur:.2f}s".format(dur=time.time()-start)
+
+def write_tab_file(output_file, headers, data):
+    "Write a tab file using the headers and data supplied."
+
+    print "Writing {file} ...".format(file=output_file),
+    sys.stdout.flush()  # display the part line to the user
+
+    start=time.time()
+
+    with open(output_file, 'w') as f:
+        writerow(f, headers)
+        writerows(f, data)
+
+    print "time taken: {dur:.2f}s".format(dur=time.time()-start)
+
 def write_table(output_file, query, arguments):
     cur = con.cursor()
 
@@ -535,3 +608,6 @@ def writerows(f, rows):
     for r in rows:
         writerow(f, r)
 
+def tuple_dict(keys, vals):
+    "Create a tuple of dictionaries, one for each row in vals, using the specified keys."
+    return tuple(zip(keys, row) for row in vals)

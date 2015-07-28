@@ -5,7 +5,9 @@ import switch_mod.utilities as utilities
 def define_components(m):
     """Make various changes to the model to facilitate reporting and avoid unwanted behavior"""
     
-    # define dispatch-related components with values for all timepoints. 
+    # define dispatch-related components with values for all timepoints.
+    # This simplifies and strongly accelerates operations that need to calculate totals
+    # across sets of projects for a given timepoint.
     m.DispatchProj_AllTimePoints = Expression(
         m.PROJECTS, m.TIMEPOINTS, 
         rule=lambda m, p, t:
@@ -18,6 +20,23 @@ def define_components(m):
             m.DispatchUpperLimit[p, t] if (p, t) in m.PROJ_DISPATCH_POINTS
                 else 0.0
     )
+    # speed up definition of LZ_NetDispatch in the core switch model
+    def LZ_NetDispatch_fast_rule(m, lz, t):
+        if not m.DispatchProj_AllTimePoints._constructed:
+            # construct the DispatchProj_AllTimePoints Expression the first time through.
+            m.DispatchProj_AllTimePoints.construct()
+            # This is necessary because DispatchProj_AllTimePoints is defined in this
+            # module, which is is loaded after all the standard switch modules. 
+            # So DispatchProj_AllTimePoints is normally scheduled for construction after 
+            # all the standard module components. But this rule needs to use it during 
+            # construction of LZ_NetDispatch, which is part of the standard modules.
+            # An alternative approach, which is both cleaner and messier, would be to 
+            # manipulate m._decl_order to move DispatchProj_AllTimePoints up in the 
+            # construction order, to just after DispatchProj, as suggested in
+            # https://groups.google.com/d/msg/pyomo-forum/dLbD2ly_hZo/5-INUaECNBkJ
+        return sum(m.DispatchProj_AllTimePoints[p, t] for p in m.LZ_PROJECTS[lz])
+    m.LZ_NetDispatch._init_rule = LZ_NetDispatch_fast_rule
+
 
     # create lists of projects by energy source
     m.PROJECTS_BY_FUEL = Set(m.FUELS, initialize=lambda m, f:

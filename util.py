@@ -53,3 +53,13 @@ def write_table(model, *indexes, **kwargs):
     append_table(model, *indexes, **kwargs)
 
     print "time taken: {dur:.2f}s".format(dur=time.time()-start)
+
+def log(msg):
+    sys.stdout.write(msg)
+    sys.stdout.flush()  # display output to the user, even a partial line
+    
+def tic():
+    tic.start_time = time.time()
+
+def toc():
+    log("time taken: {dur:.2f}s\n".format(dur=time.time()-tic.start_time))
