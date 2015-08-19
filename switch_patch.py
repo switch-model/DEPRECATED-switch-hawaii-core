@@ -5,6 +5,17 @@ import switch_mod.utilities as utilities
 def define_components(m):
     """Make various changes to the model to facilitate reporting and avoid unwanted behavior"""
     
+    # define an indexed set of all periods before or including the current one.
+    # this is useful for calculations that must index over previous and current periods
+    # e.g., amount of capacity of some resource that has been built
+    m.CURRENT_AND_PRIOR_PERIODS = Set(m.PERIODS, ordered=True, initialize=lambda m, p:
+        # note: this is a fast way to refer to all previous periods, which also respects 
+        # the built-in ordering of the set, but you have to be careful because 
+        # (a) pyomo sets are indexed from 1, not 0, and
+        # (b) python's range() function is not inclusive on the top end.
+        [m.PERIODS[i] for i in range(1, m.PERIODS.ord(p)+1)]
+    )
+    
     # define dispatch-related components with values for all timepoints.
     # This simplifies and strongly accelerates operations that need to calculate totals
     # across sets of projects for a given timepoint.
