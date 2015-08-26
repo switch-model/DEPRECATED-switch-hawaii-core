@@ -524,7 +524,7 @@ def write_tables(**args):
 
     #########################
     # EV annual energy consumption
-    if 'ev_scen_id' in args:
+    if args.get('ev_scen_id', None) is not None:
         write_table('ev_energy.tab', """
             SELECT load_zone as "LOAD_ZONE", period, ev_gwh AS ev_gwh_annual
             FROM ev_adoption a JOIN study_periods p on a.year = p.period
