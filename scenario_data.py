@@ -213,7 +213,8 @@ def write_tables(**args):
         UNION SELECT
                 g.technology as generation_technology, 
                 g.technology as g_dbid, 
-                g.max_age + 100 as g_max_age, 
+                -- formerly g.max_age + 100 as g_max_age, 
+                g.max_age as g_max_age, 
                 g.scheduled_outage_rate as g_scheduled_outage_rate, 
                 g.forced_outage_rate as g_forced_outage_rate,
                 g.variable as g_is_variable, 
