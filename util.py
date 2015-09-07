@@ -54,6 +54,10 @@ def write_table(model, *indexes, **kwargs):
 
     print "time taken: {dur:.2f}s".format(dur=time.time()-start)
 
+def get(component, index, default=None):
+    """Return an element from an indexed component, or the default value if the index is invalid."""
+    return component[index] if index in component else default
+    
 def log(msg):
     sys.stdout.write(msg)
     sys.stdout.flush()  # display output to the user, even a partial line
