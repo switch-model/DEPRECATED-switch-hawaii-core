@@ -22,7 +22,7 @@ def define_components(m):
         sorted([p for p in m.FUEL_BASED_PROJECTS if f in m.G_FUELS[m.proj_gen_tech[p]]])
     )
     m.PROJECTS_BY_NON_FUEL_ENERGY_SOURCE = Set(m.NON_FUEL_ENERGY_SOURCES, initialize=lambda m, s:
-        sorted([p for p in m.NON_FUEL_BASED_PROJECTS if m.proj_non_fuel_energy_source[p] == s])
+        sorted([p for p in m.NON_FUEL_BASED_PROJECTS if m.g_energy_source[m.proj_gen_tech[p]] == s])
     )
 
     # constrain DumpPower to zero, so we can track curtailment better

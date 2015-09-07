@@ -1,4 +1,4 @@
-import time, sys
+import time, sys, collections
 from textwrap import dedent
 import psycopg2
 
@@ -83,12 +83,6 @@ def write_tables(**args):
     # financials
 
     # this just uses a dat file, not a table (and the values are not in a database for now)
-    # print 'writing financials.dat'
-    # with open('financials.dat', 'w') as f:
-    #     f.writelines([
-    #         'param ' + name + ' := ' + str(args[name]) + ';\n' 
-    #         for name in ['base_financial_year', 'interest_rate', 'discount_rate']
-    #     ])
     write_dat_file(
         'financials.dat',
         ['base_financial_year', 'interest_rate', 'discount_rate'],
@@ -203,7 +197,8 @@ def write_tables(**args):
                 0 as g_is_cogen,
                 0 as g_competes_for_space, 
                 CASE WHEN fuel IN ('SUN', 'WND') THEN 0 ELSE variable_o_m * 1000.0 END AS g_variable_o_m,
-                fuel AS g_energy_source,
+                CASE WHEN fuel IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel') THEN 'multiple' 
+                    ELSE fuel END AS g_energy_source,
                 CASE WHEN fuel IN (SELECT fuel_type FROM fuel_costs) THEN 0.001*heat_rate ELSE null END
                     AS g_full_load_heat_rate,
                 null AS g_unit_size
@@ -224,7 +219,8 @@ def write_tables(**args):
                 g.competes_for_space as g_competes_for_space, 
                 CASE WHEN MIN(p.aer_fuel_code) IN ('SUN', 'WND') THEN 0.0 ELSE AVG(g.variable_o_m) * 1000.0 END 
                     AS g_variable_o_m,
-                MIN(p.aer_fuel_code) AS g_energy_source,
+                CASE WHEN MIN(p.aer_fuel_code) IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel') AND g.cogen=0 
+                    THEN 'multiple' ELSE MIN(p.aer_fuel_code) END AS g_energy_source,
                 CASE WHEN MIN(p.aer_fuel_code) IN (SELECT fuel_type FROM fuel_costs) 
                     THEN 0.001*ROUND(SUM(p.heat_rate*p.avg_mw)/SUM(p.avg_mw)) 
                     ELSE null 
@@ -237,6 +233,33 @@ def write_tables(**args):
             GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
         ORDER BY 1;
     """, args)
+
+    # This gets a list of all the projects flagged as "multiple" above,
+    # and listsl them as accepting several different fuels.
+    write_indexed_set_tab_file('gen_multiple_fuels.tab', 'G_MULTI_FUELS', """
+        SELECT generation_technology, fuel
+        FROM (
+            SELECT
+                replace(technology,'DistPV_peak', 'DistPV') as generation_technology
+            FROM generator_costs c
+            WHERE fuel IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel')
+                AND technology NOT IN ('DistPV_flat')
+                AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+            UNION DISTINCT
+            SELECT DISTINCT
+                g.technology as generation_technology 
+                FROM existing_plants_gen_tech g JOIN existing_plants p USING (technology)
+                WHERE p.aer_fuel_code IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel') AND g.cogen=0
+                    AND p.load_zone in %(load_zones)s
+                    AND p.insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                GROUP BY 1
+        ) g CROSS JOIN (
+            SELECT 'LNG' AS fuel 
+            UNION SELECT 'Biodiesel' 
+            UNION SELECT 'ULSD'
+        ) f;
+    """, args)
+
 
     # TODO: write code in project.unitcommit.commit to load part-load heat rates
     # TODO: get part-load heat rates for new plant technologies and report them in 
@@ -590,6 +613,42 @@ def write_table(output_file, query, arguments):
         writerows(f, cur)
 
     print "time taken: {dur:.2f}s".format(dur=time.time()-start)
+
+
+def write_indexed_set_tab_file(output_file, set_name, query, arguments):
+    """Write a .dat file defining an indexed set, based on the query provided.
+    
+    Note: the query should produce a table with index values in all columns except
+    the last, and then set members for each index in the last column. (There should
+    be multiple rows with the same values in the index columns.)"""
+
+    print "Writing {file} ...".format(file=output_file),
+    sys.stdout.flush()  # display the part line to the user
+
+    start=time.time()
+
+    cur = con.cursor()
+    cur.execute(dedent(query), arguments)
+    
+    # build a dictionary grouping all values (last column) according to their index keys (earlier columns)
+    data_dict = collections.defaultdict(list)
+    for r in cur:
+        # note: data_dict[(index vals)] is created as an empty list on first reference,
+        # then gets data from all matching rows appended to it
+        data_dict[tuple(r[:-1])].append(r[-1])
+
+    # .dat file format based on p. 161 of http://ampl.com/BOOK/CHAPTERS/12-data.pdf
+    with open(output_file, 'w') as f:
+        f.writelines([
+            'set {sn}[{idx}] := {items} ;\n'.format(
+                sn=set_name, 
+                idx=', '.join(k),
+                items=' '.join(v))
+            for k, v in data_dict.iteritems()
+        ])
+
+    print "time taken: {dur:.2f}s".format(dur=time.time()-start)
+
 
 def stringify(val):
     if val is None:
