@@ -143,7 +143,7 @@ def write_tables(**args):
     write_table('fuels.tab', """
         SELECT DISTINCT fuel_type AS fuel, 0.0 AS co2_intensity, 0.0 AS upstream_co2_intensity
         FROM fuel_costs
-        WHERE load_zone in %(load_zones)s;
+        WHERE load_zone in %(load_zones)s AND fuel_scen_id=%(fuel_scen_id)s;
     """, args)
         
     #########################
@@ -151,15 +151,51 @@ def write_tables(**args):
 
     # TODO: get monthly fuel costs from Karl Jandoc spreadsheet
 
-    write_table('fuel_cost.tab', """
-        SELECT load_zone, fuel_type as fuel, period, 
-            price_mmbtu * power(1.0+%(inflation_rate)s, %(base_financial_year)s-c.year) as fuel_cost 
+    # # simple fuel markets with no LNG expansion options
+    # write_table('fuel_cost.tab', """
+    #     SELECT load_zone, fuel_type as fuel, period,
+    #         price_mmbtu * power(1.0+%(inflation_rate)s, %(base_financial_year)s-c.year) as fuel_cost
+    #     FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
+    #     WHERE load_zone in %(load_zones)s
+    #         AND fuel_scen_id = %(fuel_scen_id)s
+    #         AND p.time_sample = %(time_sample)s
+    #     ORDER BY 1, 2, 3;
+    # """, args)
+
+    write_table('regional_fuel_markets.tab', """
+        SELECT DISTINCT concat('Hawaii_', fuel_type) AS regional_fuel_market, fuel_type AS fuel 
+        FROM fuel_costs
+        WHERE load_zone in %(load_zones)s AND fuel_scen_id = %(fuel_scen_id)s;
+    """, args)
+
+    if args['fuel_scen_id'] in ('1', '2', '3'):
+        inflator = 'power(1.0+%(inflation_rate)s, %(base_financial_year)s-c.year)'
+    elif args['fuel_scen_id'].startswith('EIA'):
+        inflator = 'power(1.0+%(inflation_rate)s, %(base_financial_year)s-2013)'
+    else:
+        inflator = '1.0'
+
+    write_table('fuel_supply_curves.tab', """
+        SELECT concat('Hawaii_', fuel_type) as regional_fuel_market, fuel_type as fuel, 
+            period,
+            tier, 
+            price_mmbtu * {inflator} as unit_cost,
+            CASE WHEN fuel_type='LNG' AND tier='bulk' THEN %(bulk_lng_limit)s ELSE NULL END AS max_avail_at_cost,
+            CASE WHEN fuel_type='LNG' AND tier='bulk' THEN %(bulk_lng_fixed_cost)s ELSE 0.0 END AS fixed_cost
         FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
-        WHERE load_zone in %(load_zones)s 
+        WHERE load_zone in %(load_zones)s
             AND fuel_scen_id = %(fuel_scen_id)s
             AND p.time_sample = %(time_sample)s
         ORDER BY 1, 2, 3;
+    """.format(inflator=inflator), args)
+
+    write_table('lz_to_regional_fuel_market.tab', """
+        SELECT DISTINCT load_zone, concat('Hawaii_', fuel_type) AS regional_fuel_market 
+        FROM fuel_costs 
+        WHERE load_zone in %(load_zones)s AND fuel_scen_id = %(fuel_scen_id)s;
     """, args)
+
+    # TODO: (when multi-island) add fuel_cost_adders for each zone
 
 
     #########################
@@ -213,7 +249,7 @@ def write_tables(**args):
                 g.scheduled_outage_rate as g_scheduled_outage_rate, 
                 g.forced_outage_rate as g_forced_outage_rate,
                 g.variable as g_is_variable, 
-                0 as g_is_baseload,
+                g.baseload as g_is_baseload,
                 0 as g_is_flexible_baseload, 
                 g.cogen as g_is_cogen,
                 g.competes_for_space as g_competes_for_space, 
@@ -235,29 +271,36 @@ def write_tables(**args):
     """, args)
 
     # This gets a list of all the projects flagged as "multiple" above,
-    # and listsl them as accepting several different fuels.
-    write_indexed_set_tab_file('gen_multiple_fuels.tab', 'G_MULTI_FUELS', """
-        SELECT generation_technology, fuel
+    # and lists them as accepting several different fuels (not 
+    # necessarily the ones they're reported as using!).
+    # NOTE: we assume pure LSFO cannot be burned in any of the studies
+    # TODO: allow LSFO-capable plants to burn LSFO in the past but not after 2017
+    write_indexed_set_dat_file('gen_multiple_fuels.dat', 'G_MULTI_FUELS', """
+        SELECT DISTINCT generation_technology, fuel
         FROM (
             SELECT
-                replace(technology,'DistPV_peak', 'DistPV') as generation_technology
+                replace(technology,'DistPV_peak', 'DistPV') as generation_technology,
+                fuel as orig_fuel,
+                0 as cogen
             FROM generator_costs c
-            WHERE fuel IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel')
-                AND technology NOT IN ('DistPV_flat')
-                AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+            WHERE min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
             UNION DISTINCT
             SELECT DISTINCT
-                g.technology as generation_technology 
-                FROM existing_plants_gen_tech g JOIN existing_plants p USING (technology)
-                WHERE p.aer_fuel_code IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel') AND g.cogen=0
-                    AND p.load_zone in %(load_zones)s
-                    AND p.insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
-                GROUP BY 1
+                g.technology as generation_technology, 
+                p.aer_fuel_code as orig_fuel,
+                g.cogen
+            FROM existing_plants_gen_tech g JOIN existing_plants p USING (technology)
+            WHERE p.load_zone in %(load_zones)s
+                AND p.insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
         ) g CROSS JOIN (
             SELECT 'LNG' AS fuel 
+            UNION SELECT 'Diesel' 
             UNION SELECT 'Biodiesel' 
-            UNION SELECT 'ULSD'
-        ) f;
+            UNION SELECT 'LSFO-Diesel-Blend'
+        ) f
+        WHERE g.orig_fuel IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel')
+            AND g.cogen = 0
+            AND (g.orig_fuel = 'LSFO' OR f.fuel != 'LSFO-Diesel-Blend');
     """, args)
 
 
@@ -615,7 +658,7 @@ def write_table(output_file, query, arguments):
     print "time taken: {dur:.2f}s".format(dur=time.time()-start)
 
 
-def write_indexed_set_tab_file(output_file, set_name, query, arguments):
+def write_indexed_set_dat_file(output_file, set_name, query, arguments):
     """Write a .dat file defining an indexed set, based on the query provided.
     
     Note: the query should produce a table with index values in all columns except
