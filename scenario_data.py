@@ -20,14 +20,15 @@ import psycopg2
 try:
     pghost='switch.eng.hawaii.edu'
     # note: the connection gets created when the module loads and never gets closed (until presumably python exits)
-    con = psycopg2.connect(database='switch', host=pghost, user='switch_user')
+    con = psycopg2.connect(database='switch', host=pghost) #, user='switch_user')
     
 except psycopg2.OperationalError:
     print dedent("""
         ############################################################################################
-        Error while connecting to switch database on postgres server {server} as user 'switch_user'.
-        Please ensure that there is a line like "*:*:*:switch_user:<password>" in 
-        ~/.pgpass (which should be chmod 0600) or %APPDATA%\postgresql\pgpass.conf (Windows).    
+        Error while connecting to switch database on postgres server {server}.
+        Please ensure that the PGUSER environment variable is set with your postgres username
+        and there is a line like "*:*:*:<user>:<password>" in ~/.pgpass (which should be chmod 0600) 
+        or in %APPDATA%\postgresql\pgpass.conf (Windows).    
         See http://www.postgresql.org/docs/9.1/static/libpq-pgpass.html for more details.
         ############################################################################################
         """.format(server=pghost))
