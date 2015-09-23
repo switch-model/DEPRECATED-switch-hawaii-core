@@ -137,7 +137,8 @@ def write_tables(**args):
             FROM existing_plants 
             WHERE aer_fuel_code NOT IN (SELECT fuel_type FROM fuel_costs)
                 AND load_zone in %(load_zones)s
-                AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s);
+                AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND technology NOT IN %(exclude_technologies)s;
     """, args)
 
     # TODO: tabulate CO2 intensity of fuels
@@ -274,6 +275,7 @@ def write_tables(**args):
             FROM existing_plants_gen_tech g JOIN existing_plants p USING (technology)
             WHERE p.load_zone in %(load_zones)s
                 AND p.insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND g.technology NOT IN %(exclude_technologies)s
             GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
         ORDER BY 1;
     """, args)
@@ -292,6 +294,7 @@ def write_tables(**args):
                 0 as cogen
             FROM generator_costs c
             WHERE min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND technology NOT IN %(exclude_technologies)s
             UNION DISTINCT
             SELECT DISTINCT
                 g.technology as generation_technology, 
@@ -300,6 +303,7 @@ def write_tables(**args):
             FROM existing_plants_gen_tech g JOIN existing_plants p USING (technology)
             WHERE p.load_zone in %(load_zones)s
                 AND p.insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND g.technology NOT IN %(exclude_technologies)s
         ) g CROSS JOIN (
             SELECT 'LNG' AS fuel 
             UNION SELECT 'Diesel' 
@@ -343,6 +347,7 @@ def write_tables(**args):
         # FROM existing_plants
         # WHERE load_zone in %(load_zones)s
         #     AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+        #     AND technology NOT IN %(exclude_technologies)s
         # GROUP BY 1, 2
 
 
@@ -422,6 +427,7 @@ def write_tables(**args):
             FROM t_all_projects a JOIN generator_costs g on g.technology=a.proj_gen_tech
             WHERE a.proj_load_zone IN %(load_zones)s
                 AND g.min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND g.technology NOT IN %(exclude_technologies)s
             UNION
             -- collect data on existing projects
             SELECT DISTINCT 
@@ -436,6 +442,7 @@ def write_tables(**args):
             FROM existing_plants
             WHERE load_zone IN %(load_zones)s
                 AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND technology NOT IN %(exclude_technologies)s
             GROUP BY 1, 2, 3, 4, 5, 6
             ORDER BY 4, 3, 1;
     """, args)
@@ -448,6 +455,7 @@ def write_tables(**args):
         FROM existing_plants
         WHERE load_zone in %(load_zones)s
             AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+            AND technology NOT IN %(exclude_technologies)s
         GROUP BY 1, 2;
     """, args)
 
@@ -462,6 +470,7 @@ def write_tables(**args):
         FROM existing_plants
         WHERE load_zone in %(load_zones)s
             AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+            AND technology NOT IN %(exclude_technologies)s
         GROUP BY 1, 2;
     """, args)
 
@@ -482,6 +491,7 @@ def write_tables(**args):
                 JOIN study_hour h using (date_time)
             WHERE load_zone in %(load_zones)s and time_sample = %(time_sample)s
                 AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND g.technology NOT IN %(exclude_technologies)s
             UNION 
             SELECT 
                 c.project_id as "PROJECT", 
@@ -493,6 +503,7 @@ def write_tables(**args):
                 AND c.load_zone in %(load_zones)s
                 AND h.time_sample = %(time_sample)s
                 AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND technology NOT IN %(exclude_technologies)s
             ORDER BY 1, 2
         """, args)
 
@@ -524,6 +535,8 @@ def write_tables(**args):
             FROM existing_plants, study_hour
             WHERE load_zone in %(load_zones)s
                 AND time_sample = %(time_sample)s
+                AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND technology NOT IN %(exclude_technologies)s
         ) AS the_data
         WHERE proj_min_commit_fraction IS NOT NULL OR proj_max_commit_fraction IS NOT NULL OR proj_min_load_fraction IS NOT NULL;
     """, args)
@@ -545,6 +558,7 @@ def write_tables(**args):
     #     FROM existing_plants
     #     WHERE load_zone in %(load_zones)s
     #        AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+    #        AND technology NOT IN %(exclude_technologies)s
     #     GROUP BY 1
     #     ORDER by 1;
     # """, args)
