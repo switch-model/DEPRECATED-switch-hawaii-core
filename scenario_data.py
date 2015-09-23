@@ -18,7 +18,7 @@ import psycopg2
 # or null behaviors described above.
 
 try:
-    pghost='switch.eng.hawaii.edu'
+    pghost='redr.eng.hawaii.edu'
     # note: the connection gets created when the module loads and never gets closed (until presumably python exits)
     con = psycopg2.connect(database='switch', host=pghost) #, user='switch_user')
     
@@ -142,11 +142,20 @@ def write_tables(**args):
 
     # TODO: tabulate CO2 intensity of fuels
     write_table('fuels.tab', """
-        SELECT DISTINCT fuel_type AS fuel, 0.0 AS co2_intensity, 0.0 AS upstream_co2_intensity
-        FROM fuel_costs
+        SELECT DISTINCT c.fuel_type AS fuel, co2_intensity, 0.0 AS upstream_co2_intensity
+        FROM fuel_costs c JOIN fuel_properties p using (fuel_type)
         WHERE load_zone in %(load_zones)s AND fuel_scen_id=%(fuel_scen_id)s;
     """, args)
-        
+
+    #########################
+    # rps targets
+    
+    write_tab_file(
+        'rps_targets.tab', 
+        headers=('year', 'rps_target'), 
+        data=[(y, args['rps_targets'][y]) for y in sorted(args['rps_targets'].keys())]
+    )
+
     #########################
     # fuel_markets
 
@@ -203,7 +212,6 @@ def write_tables(**args):
     # gen_tech
 
     # TODO: provide reasonable retirement ages for existing plants (not 100+base age)
-    # TODO: rename/drop the DistPV_peak and DistPV_flat technologies in the generator_costs table
     # note: this zeroes out variable_o_m for renewable projects
     # TODO: find out where variable_o_m came from for renewable projects and put it in the right place
     # TODO: fix baseload flag in the database
@@ -216,15 +224,14 @@ def write_tables(**args):
     # Switch-Hawaii/data/HECO\ IRP\ Report/IRP-2013-App-K-Supply-Side-Resource-Assessment-062813-Filed.pdf
     # and then incorporate those into unit_sizes.tab below.
     # NOTE: this converts variable o&m from $/kWh to $/MWh
-    # NOTE: for now we turn off the baseload flag for all gens, to allow for a 100% RPS
     # NOTE: we don't provide the following in this version:
     # g_min_build_capacity
     # g_ccs_capture_efficiency, g_ccs_energy_load,
     # g_storage_efficiency, g_store_to_release_ratio
             
     write_table('generator_info.tab', """
-        SELECT  replace(technology,'DistPV_peak', 'DistPV') as generation_technology, 
-                replace(technology,'DistPV_peak', 'DistPV') as g_dbid,
+        SELECT  technology as generation_technology, 
+                technology as g_dbid,
                 max_age_years as g_max_age, 
                 scheduled_outage_rate as g_scheduled_outage_rate, 
                 forced_outage_rate as g_forced_outage_rate,
@@ -240,7 +247,7 @@ def write_tables(**args):
                     AS g_full_load_heat_rate,
                 null AS g_unit_size
             FROM generator_costs
-            WHERE technology NOT IN ('DistPV_flat')
+            WHERE technology NOT IN %(exclude_technologies)s
                 AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
         UNION SELECT
                 g.technology as generation_technology, 
@@ -280,7 +287,7 @@ def write_tables(**args):
         SELECT DISTINCT generation_technology, fuel
         FROM (
             SELECT
-                replace(technology,'DistPV_peak', 'DistPV') as generation_technology,
+                technology as generation_technology,
                 fuel as orig_fuel,
                 0 as cogen
             FROM generator_costs c
@@ -318,12 +325,12 @@ def write_tables(**args):
     # NOTE: costs in this version of switch are expressed in $/MW, $/MW-year, etc., not per kW.
     write_table('gen_new_build_costs.tab', """
         SELECT  
-            replace(technology,'DistPV_peak', 'DistPV') as generation_technology, 
+            technology as generation_technology, 
             period AS investment_period,
             capital_cost_per_kw *1000.0 AS g_overnight_cost, 
             fixed_o_m*1000.0 AS g_fixed_o_m
         FROM generator_costs, study_periods
-        WHERE technology NOT IN ('DistPV_flat')
+        WHERE technology NOT IN %(exclude_technologies)s
             AND time_sample = %(time_sample)s
             AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
         ORDER BY 1, 2;
@@ -370,7 +377,7 @@ def write_tables(**args):
 
     write_table('project_info.tab', """
             -- make a list of all projects with detailed definitions (and gather the available data)
-            DO $$ BEGIN PERFORM drop_temporary_table('t_specific_projects'); END $$;
+            DROP TABLE IF EXISTS t_specific_projects;
             CREATE TEMPORARY TABLE t_specific_projects AS
                 SELECT 
                     concat_ws('_', 
@@ -386,7 +393,7 @@ def write_tables(**args):
                 FROM connect_cost c FULL JOIN max_capacity m USING (load_zone, technology, site, orientation);
 
             -- make a list of generic projects (for which no detailed definitions are available)
-            DO $$ BEGIN PERFORM drop_temporary_table('t_generic_projects'); END $$;
+            DROP TABLE IF EXISTS t_generic_projects;
             CREATE TEMPORARY TABLE t_generic_projects AS
                 SELECT 
                     concat_ws('_', load_zone, technology) AS "PROJECT",
@@ -399,7 +406,7 @@ def write_tables(**args):
                 WHERE g.technology NOT IN (SELECT proj_gen_tech FROM t_specific_projects);
         
             -- merge the specific and generic projects
-            DO $$ BEGIN PERFORM drop_temporary_table('t_all_projects'); END $$;
+            DROP TABLE IF EXISTS t_all_projects;
             CREATE TEMPORARY TABLE t_all_projects AS
             SELECT * FROM t_specific_projects UNION SELECT * from t_generic_projects;
         

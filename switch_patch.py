@@ -26,6 +26,11 @@ def define_components(m):
     )
 
     # constrain DumpPower to zero, so we can track curtailment better
+    # It's not clear why Dump_Power is in the model, since its effect can be achieved
+    # more precisely via the dispatch decision variables. If it's a stand-in for a 
+    # dump load, then that should be modified as a model-selectable demand,
+    # with a limited capacity and a certain capital cost per MW of capacity (pretty
+    # much like a standard project but with a negative production and no variable cost).
     m.No_Dump_Power = Constraint(m.LOAD_ZONES, m.TIMEPOINTS,
         rule=lambda m, z, t: m.DumpPower[z, t] == 0.0
     )
