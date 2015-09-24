@@ -229,6 +229,14 @@ def write_tables(**args):
     # g_min_build_capacity
     # g_ccs_capture_efficiency, g_ccs_energy_load,
     # g_storage_efficiency, g_store_to_release_ratio
+
+    # NOTE: for all energy sources other than 'SUN' and 'WND' (i.e., all fuels),
+    # We report the fuel as 'multiple' and then provide data in a multi-fuel table.
+    # Some of these are actually single-fuel, but this approach is simpler than sorting
+    # them out within each query, and it doesn't add any complexity to the model.
+    
+    # TODO: maybe replace "fuel IN ('SUN', 'WND', 'MSW')" with "fuel not in (SELECT fuel FROM fuel_cost)"
+    # TODO: convert 'MSW' to a proper fuel, possibly with a negative cost, instead of ignoring it
             
     write_table('generator_info.tab', """
         SELECT  technology as generation_technology, 
@@ -242,10 +250,8 @@ def write_tables(**args):
                 0 as g_is_cogen,
                 0 as g_competes_for_space, 
                 CASE WHEN fuel IN ('SUN', 'WND') THEN 0 ELSE variable_o_m * 1000.0 END AS g_variable_o_m,
-                CASE WHEN fuel IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel') THEN 'multiple' 
-                    ELSE fuel END AS g_energy_source,
-                CASE WHEN fuel IN (SELECT fuel_type FROM fuel_costs) THEN 0.001*heat_rate ELSE null END
-                    AS g_full_load_heat_rate,
+                CASE WHEN fuel IN ('SUN', 'WND', 'MSW') THEN fuel ELSE 'multiple' END AS g_energy_source,
+                CASE WHEN fuel IN ('SUN', 'WND', 'MSW') THEN null ELSE 0.001*heat_rate END AS g_full_load_heat_rate,
                 null AS g_unit_size
             FROM generator_costs
             WHERE technology NOT IN %(exclude_technologies)s
@@ -264,13 +270,10 @@ def write_tables(**args):
                 g.competes_for_space as g_competes_for_space, 
                 CASE WHEN MIN(p.aer_fuel_code) IN ('SUN', 'WND') THEN 0.0 ELSE AVG(g.variable_o_m) * 1000.0 END 
                     AS g_variable_o_m,
-                CASE WHEN MIN(p.aer_fuel_code) IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel') AND g.cogen=0 
-                    THEN 'multiple' ELSE MIN(p.aer_fuel_code) END AS g_energy_source,
-                CASE WHEN MIN(p.aer_fuel_code) IN (SELECT fuel_type FROM fuel_costs) 
-                    THEN 0.001*ROUND(SUM(p.heat_rate*p.avg_mw)/SUM(p.avg_mw)) 
-                    ELSE null 
-                    END 
-                    AS g_full_load_heat_rate,
+                CASE WHEN MIN(p.aer_fuel_code) IN ('SUN', 'WND', 'MSW') THEN MIN(p.aer_fuel_code) ELSE 'multiple' END AS g_energy_source,
+                CASE WHEN MIN(p.aer_fuel_code) IN ('SUN', 'WND', 'MSW') THEN null 
+                    ELSE 0.001*SUM(p.heat_rate*p.avg_mw)/SUM(p.avg_mw) 
+                    END AS g_full_load_heat_rate,
                 AVG(peak_mw) AS g_unit_size  -- minimum block size for unit commitment
             FROM existing_plants_gen_tech g JOIN existing_plants p USING (technology)
             WHERE p.load_zone in %(load_zones)s
@@ -280,14 +283,16 @@ def write_tables(**args):
         ORDER BY 1;
     """, args)
 
-    # This gets a list of all the projects flagged as "multiple" above,
-    # and lists them as accepting several different fuels (not 
-    # necessarily the ones they're reported as using!).
-    # NOTE: we assume pure LSFO cannot be burned in any of the studies
-    # TODO: allow LSFO-capable plants to burn LSFO in the past but not after 2017
+    # This gets a list of all the fueled projects (listed as "multiple" energy sources above),
+    # and lists them as accepting any equivalent or lighter fuel. (However, cogen plants and plants 
+    # using fuels with rank 0 are not changed.) Fuels are also filtered against the list of fuels with
+    # costs reported for the current scenario, so this can end up re-mapping one fuel in the database
+    # (e.g., LSFO) to a similar fuel in the scenario (e.g., LSFO-Diesel-Blend), even if the original fuel
+    # doesn't exist in the fuel_costs table. This can also be used to remap different names for the same
+    # fuel (e.g., "COL" in the plant definition and "Coal" in the fuel_costs table, both with the same
+    # fuel_rank).
     write_indexed_set_dat_file('gen_multiple_fuels.dat', 'G_MULTI_FUELS', """
-        SELECT DISTINCT generation_technology, fuel
-        FROM (
+        WITH all_projects AS (
             SELECT
                 technology as generation_technology,
                 fuel as orig_fuel,
@@ -304,15 +309,15 @@ def write_tables(**args):
             WHERE p.load_zone in %(load_zones)s
                 AND p.insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
                 AND g.technology NOT IN %(exclude_technologies)s
-        ) g CROSS JOIN (
-            SELECT 'LNG' AS fuel 
-            UNION SELECT 'Diesel' 
-            UNION SELECT 'Biodiesel' 
-            UNION SELECT 'LSFO-Diesel-Blend'
-        ) f
-        WHERE g.orig_fuel IN ('LNG', 'LSFO', 'Biodiesel', 'High-Sulfur-Diesel')
-            AND g.cogen = 0
-            AND (g.orig_fuel = 'LSFO' OR f.fuel != 'LSFO-Diesel-Blend');
+        ), all_fueled_projects AS (
+            SELECT * from all_projects WHERE orig_fuel NOT IN ('SUN', 'WND', 'MSW')
+        )
+        SELECT DISTINCT generation_technology, b.fuel_type as fuel
+        FROM all_fueled_projects p 
+            JOIN fuel_properties a ON a.fuel_type = p.orig_fuel
+            JOIN fuel_properties b ON b.fuel_rank >= a.fuel_rank AND
+                ((a.fuel_rank > 0 AND p.cogen = 0) OR a.fuel_type = b.fuel_type)    -- 0-rank or cogen can't change fuels
+            WHERE b.fuel_type IN (SELECT fuel_type FROM fuel_costs WHERE fuel_scen_id = %(fuel_scen_id)s);
     """, args)
 
 
