@@ -141,9 +141,9 @@ def write_tables(**args):
                 AND technology NOT IN %(exclude_technologies)s;
     """, args)
 
-    # TODO: tabulate CO2 intensity of fuels
+    # gather info on fuels
     write_table('fuels.tab', """
-        SELECT DISTINCT c.fuel_type AS fuel, co2_intensity, 0.0 AS upstream_co2_intensity
+        SELECT DISTINCT c.fuel_type AS fuel, co2_intensity, 0.0 AS upstream_co2_intensity, rps_eligible
         FROM fuel_costs c JOIN fuel_properties p using (fuel_type)
         WHERE load_zone in %(load_zones)s AND fuel_scen_id=%(fuel_scen_id)s;
     """, args)
@@ -503,7 +503,7 @@ def write_tables(**args):
                 AND c.load_zone in %(load_zones)s
                 AND h.time_sample = %(time_sample)s
                 AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
-                AND technology NOT IN %(exclude_technologies)s
+                AND p.technology NOT IN %(exclude_technologies)s
             ORDER BY 1, 2
         """, args)
 
