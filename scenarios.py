@@ -29,16 +29,16 @@ class AddListAction(argparse.Action):
         getattr(namespace, self.dest).extend(iterify(values))
 
 # define a standard argument parser, which can be used to setup scenarios
+# NOTE: you can't safely use default values here, because those end up being
+# assigned to cmd_line_args(), and then they override an values set for the
+# standard scenarios.
 parser = argparse.ArgumentParser(description='Solve one or more Switch-Hawaii scenarios.')
 parser.add_argument('--inputs', dest='inputs_dir')
+parser.add_argument('--inputs_subdir')
 parser.add_argument('--outputs', dest='outputs_dir')
 parser.add_argument('--scenario', action=AddListAction, dest='scenario_to_run')
 parser.add_argument('--scenarios', action=AddListAction, nargs='+', dest='scenario_to_run')
 parser.add_argument('--scenario_name')
-parser.add_argument('--tag')
-parser.add_argument('--ph_year', type=int)
-parser.add_argument('--ph_mw', type=float)
-# TODO: something about dr_shares
 parser.add_argument('--exclude', action=AddModuleAction, dest='exclude_module', nargs='+')
 parser.add_argument('-n', action=RemoveModuleAction, dest='exclude_module')
 parser.add_argument('--include', action=AddModuleAction, dest='include_module', nargs='+')
@@ -49,16 +49,20 @@ def args_dict(*a):
     """call the parser to get the args, then return them as a dictionary, omitting None's'"""
     return {k: v for k, v in vars(parser.parse_args(*a)).iteritems() if v is not None}
 
-# store current command line arguments for use by various functions
-cmd_line_args = args_dict()
+# report current command line arguments for use by various functions
+# This is a function instead of a constant, so users can call
+# scenarios.parser.add_argument() to add arguments of their own before evaluation
+def cmd_line_args():
+    return args_dict()
 
 def get_required_scenario_names():
     """Return list of names of scenario(s) that were requested or defined from the command line 
     via --scenario[s] or --scenario_name.
     Return an empty list if none were requested/defined."""
-    if "scenario_to_run" in cmd_line_args:
-        return cmd_line_args["scenario_to_run"]
-    elif "scenario_name" in cmd_line_args or not os.path.isfile('scenarios_to_run.txt'):
+    a = cmd_line_args()
+    if "scenario_to_run" in a:
+        return a["scenario_to_run"]
+    elif "scenario_name" in a or not os.path.isfile('scenarios_to_run.txt'):
         # They have defined one specific scenario on the command line, which is not based on any standard scenario,
         # or there are no standard scenarios.
         # Return a no-name scenario, which indicates to build the scenario without referring to any standard scenario.
@@ -78,20 +82,20 @@ def start_next_standard_scenario():
         if scenario_already_run(s):
             continue
         else:
-            return merge_scenarios(args, cmd_line_args)
+            return merge_scenarios(args, cmd_line_args())
     return None     # no more scenarios to run
 
 def get_scenario_args(scenario):
     """Return the arguments for the specified standard scenario, amended with any command-line arguments.
     This may also be called with an empty scenario name ('') to define a scenario using only command-line arguments."""
     if scenario == '':
-        return merge_scenarios(cmd_line_args)
+        return merge_scenarios(cmd_line_args())
     else:
         scenario_list = get_standard_scenarios_dict()
         if scenario not in scenario_list:
             raise RuntimeError("Scenario {s} has not been defined.".format(s=scenario))
         else:
-            return merge_scenarios(scenario_list[scenario], cmd_line_args)
+            return merge_scenarios(scenario_list[scenario], cmd_line_args())
         
 def get_standard_scenarios_dict():
     """Return collection of standard scenarios, as defined in scenarios_to_run.txt.

@@ -1,4 +1,4 @@
-import time, sys, collections
+import time, sys, collections, os
 from textwrap import dedent
 import psycopg2
 
@@ -47,9 +47,10 @@ except psycopg2.OperationalError:
 # calculations or writing .dat files (which are used for a few parameters)
 
 def write_tables(**args):
+
     #########################
     # timescales
-
+    
     write_table('periods.tab', """
         SELECT period AS "INVESTMENT_PERIOD",
                 period as period_start,
@@ -77,7 +78,7 @@ def write_tables(**args):
                 h.study_date as timeseries 
             FROM study_hour h JOIN study_date d USING (study_date, time_sample)
             WHERE h.time_sample = %(time_sample)s
-            ORDER BY period, 3, 2;
+            ORDER BY period, extract(doy from date), study_hour;
     """, args)
 
     #########################
@@ -144,7 +145,7 @@ def write_tables(**args):
     # gather info on fuels
     write_table('fuels.tab', """
         SELECT DISTINCT c.fuel_type AS fuel, co2_intensity, 0.0 AS upstream_co2_intensity, rps_eligible
-        FROM fuel_costs c JOIN fuel_properties p using (fuel_type)
+        FROM fuel_costs c JOIN energy_source_properties p on (p.energy_source = c.fuel_type)
         WHERE load_zone in %(load_zones)s AND fuel_scen_id=%(fuel_scen_id)s;
     """, args)
 
@@ -154,7 +155,8 @@ def write_tables(**args):
     write_tab_file(
         'rps_targets.tab', 
         headers=('year', 'rps_target'), 
-        data=[(y, args['rps_targets'][y]) for y in sorted(args['rps_targets'].keys())]
+        data=[(y, args['rps_targets'][y]) for y in sorted(args['rps_targets'].keys())],
+        arguments=args
     )
 
     #########################
@@ -292,7 +294,7 @@ def write_tables(**args):
     # fuel (e.g., "COL" in the plant definition and "Coal" in the fuel_costs table, both with the same
     # fuel_rank).
     write_indexed_set_dat_file('gen_multiple_fuels.dat', 'G_MULTI_FUELS', """
-        WITH all_projects AS (
+        WITH all_techs AS (
             SELECT
                 technology as generation_technology,
                 fuel as orig_fuel,
@@ -309,15 +311,15 @@ def write_tables(**args):
             WHERE p.load_zone in %(load_zones)s
                 AND p.insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
                 AND g.technology NOT IN %(exclude_technologies)s
-        ), all_fueled_projects AS (
-            SELECT * from all_projects WHERE orig_fuel NOT IN ('SUN', 'WND', 'MSW')
+        ), all_fueled_techs AS (
+            SELECT * from all_techs WHERE orig_fuel NOT IN ('SUN', 'WND', 'MSW')
         )
-        SELECT DISTINCT generation_technology, b.fuel_type as fuel
-        FROM all_fueled_projects p 
-            JOIN fuel_properties a ON a.fuel_type = p.orig_fuel
-            JOIN fuel_properties b ON b.fuel_rank >= a.fuel_rank AND
-                ((a.fuel_rank > 0 AND p.cogen = 0) OR a.fuel_type = b.fuel_type)    -- 0-rank or cogen can't change fuels
-            WHERE b.fuel_type IN (SELECT fuel_type FROM fuel_costs WHERE fuel_scen_id = %(fuel_scen_id)s);
+        SELECT DISTINCT generation_technology, b.energy_source as fuel
+        FROM all_fueled_techs t 
+            JOIN energy_source_properties a ON a.energy_source = t.orig_fuel
+            JOIN energy_source_properties b ON b.fuel_rank >= a.fuel_rank AND
+                ((a.fuel_rank > 0 AND t.cogen = 0) OR a.energy_source = b.energy_source)    -- 0-rank or cogen can't change fuels
+            WHERE b.energy_source IN (SELECT fuel_type FROM fuel_costs WHERE fuel_scen_id = %(fuel_scen_id)s);
     """, args)
 
 
@@ -329,6 +331,16 @@ def write_tables(**args):
     # NOTE: we divide heat rate by 1000 to convert from Btu/kWh to MBtu/MWh
 
 
+    inflator = "power(1.0 + CASE fuel"
+    if 'wind_capital_cost_escalator' in args or 'pv_capital_cost_escalator' in args:
+        if 'wind_capital_cost_escalator' in args:
+            inflator += " WHEN 'WND' THEN %(wind_capital_cost_escalator)s"
+        if 'pv_capital_cost_escalator' in args:
+            inflator += " WHEN 'SUN' THEN %(pv_capital_cost_escalator)s"
+        inflator += ' ELSE 0.0 END, period - %(base_financial_year)s)'
+    else:
+        inflator = "1.0"
+
     # note: this table can only hold costs for technologies with future build years,
     # so costs for existing technologies are specified in project_specific_costs.tab
     # NOTE: costs in this version of switch are expressed in $/MW, $/MW-year, etc., not per kW.
@@ -336,24 +348,14 @@ def write_tables(**args):
         SELECT  
             technology as generation_technology, 
             period AS investment_period,
-            capital_cost_per_kw *1000.0 AS g_overnight_cost, 
+            capital_cost_per_kw * 1000.0 * {inflator} AS g_overnight_cost, 
             fixed_o_m*1000.0 AS g_fixed_o_m
         FROM generator_costs, study_periods
         WHERE technology NOT IN %(exclude_technologies)s
             AND time_sample = %(time_sample)s
             AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
         ORDER BY 1, 2;
-    """, args)
-        # UNION
-        # SELECT technology AS generation_technology, 
-        #         insvyear AS investment_period, 
-        #         sum(overnight_cost * 1000.0 * peak_mw) / sum(peak_mw) as g_overnight_cost,
-        #         sum(fixed_o_m * 1000.0 * peak_mw) / sum(peak_mw) as g_fixed_o_m
-        # FROM existing_plants
-        # WHERE load_zone in %(load_zones)s
-        #     AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
-        #     AND technology NOT IN %(exclude_technologies)s
-        # GROUP BY 1, 2
+    """.format(inflator=inflator), args)
 
 
 
@@ -612,7 +614,7 @@ def write_tables(**args):
     # TODO: put these data in a database and write a .tab file instead
     write_dat_file(
         'batteries.dat',
-        [x for x in args if x.startswith('battery_')],
+        [k for k in args if k.startswith('battery_')],
         args
     )
 
@@ -629,18 +631,60 @@ def write_tables(**args):
 
     #########################
     # pumped hydro
-    # TODO: put these data in a database and write a .tab file instead
+    # TODO: put these data in a database with hydro_scen_id's and pull them from there
+    
+    # write_tab_file(
+    #     'pumped_hydro.tab'
+    #     headers=args["pumped_hydro_headers"],
+    #     data=args["pumped_hydro_data"]
+    #     arguments=args
+    # )
+
     write_dat_file(
         'pumped_hydro.dat',
-        [x for x in args if x.startswith('pumped_hydro_')],
+        [k for k in args if k.startswith('pumped_hydro_')],
         args
     )
 
+# the two functions below could be used as the start of a system
+# to write placeholder files for any files in the current scenario 
+# that match the base files. This could be used to avoid creating large
+# files (variable_cap_factor.tab) for alternative scenarios that are 
+# otherwise very similar. i.e., placeholder .tab or .dat files could 
+# be written with just the line 'include ../variable_cap_factor.tab' or 
+# 'include ../financial.dat'.
+
+def any_alt_args_in_list(args, l):
+    """Report whether any arguments in the args list appear in the list l."""
+    for a in args.get('alt_args', {}):
+        if a in l:
+            return True
+    return False
+    
+def any_alt_args_in_query(args, query):
+    """Report whether any arguments in the args list appear in the list l."""
+    for a in args.get('alt_args', {}):
+        if '%(' + a + ')s' in query:
+            return True
+    return False    
+
+def make_file_path(file, args):
+    """Create any directories and subdirectories needed to store data in the specified file,
+    based on inputs_dir and inputs_subdir arguments. Return a pathname to the file."""
+    # extract extra path information from args (if available)
+    # and build a path to the specified file.
+    path = os.path.join(args.get('inputs_dir', ''), args.get('inputs_subdir', ''))
+    if path != '' and not os.path.exists(path):
+        os.makedirs(path)
+    path = os.path.join(path, file)
+    return path
 
 def write_dat_file(output_file, args_to_write, arguments):
     """ write a simple .dat file with the arguments specified in args_to_write, 
     drawn from the arguments dictionary"""
+    
     if any(arg in arguments for arg in args_to_write):
+        output_file = make_file_path(output_file, arguments)
         print "Writing {file} ...".format(file=output_file),
         sys.stdout.flush()  # display the part line to the user
         start=time.time()
@@ -653,21 +697,8 @@ def write_dat_file(output_file, args_to_write, arguments):
         
         print "time taken: {dur:.2f}s".format(dur=time.time()-start)
 
-def write_tab_file(output_file, headers, data):
-    "Write a tab file using the headers and data supplied."
-
-    print "Writing {file} ...".format(file=output_file),
-    sys.stdout.flush()  # display the part line to the user
-
-    start=time.time()
-
-    with open(output_file, 'w') as f:
-        writerow(f, headers)
-        writerows(f, data)
-
-    print "time taken: {dur:.2f}s".format(dur=time.time()-start)
-
 def write_table(output_file, query, arguments):
+    output_file = make_file_path(output_file, arguments)
     cur = con.cursor()
 
     print "Writing {file} ...".format(file=output_file),
@@ -684,6 +715,21 @@ def write_table(output_file, query, arguments):
 
     print "time taken: {dur:.2f}s".format(dur=time.time()-start)
 
+def write_tab_file(output_file, headers, data, arguments):
+    "Write a tab file using the headers and data supplied."
+    output_file = make_file_path(output_file, arguments)
+
+    print "Writing {file} ...".format(file=output_file),
+    sys.stdout.flush()  # display the part line to the user
+
+    start=time.time()
+
+    with open(output_file, 'w') as f:
+        writerow(f, headers)
+        writerows(f, data)
+
+    print "time taken: {dur:.2f}s".format(dur=time.time()-start)
+
 
 def write_indexed_set_dat_file(output_file, set_name, query, arguments):
     """Write a .dat file defining an indexed set, based on the query provided.
@@ -692,6 +738,7 @@ def write_indexed_set_dat_file(output_file, set_name, query, arguments):
     the last, and then set members for each index in the last column. (There should
     be multiple rows with the same values in the index columns.)"""
 
+    output_file = make_file_path(output_file, arguments)
     print "Writing {file} ...".format(file=output_file),
     sys.stdout.flush()  # display the part line to the user
 
