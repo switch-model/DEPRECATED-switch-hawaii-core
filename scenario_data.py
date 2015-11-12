@@ -1,4 +1,4 @@
-import time, sys
+import time, sys, collections, os
 from textwrap import dedent
 import psycopg2
 
@@ -18,7 +18,7 @@ import psycopg2
 # or null behaviors described above.
 
 try:
-    pghost='switch.eng.hawaii.edu'
+    pghost='redr.eng.hawaii.edu'
     # note: the connection gets created when the module loads and never gets closed (until presumably python exits)
     con = psycopg2.connect(database='switch', host=pghost) #, user='switch_user')
     
@@ -47,9 +47,10 @@ except psycopg2.OperationalError:
 # calculations or writing .dat files (which are used for a few parameters)
 
 def write_tables(**args):
+
     #########################
     # timescales
-
+    
     write_table('periods.tab', """
         SELECT period AS "INVESTMENT_PERIOD",
                 period as period_start,
@@ -77,19 +78,13 @@ def write_tables(**args):
                 h.study_date as timeseries 
             FROM study_hour h JOIN study_date d USING (study_date, time_sample)
             WHERE h.time_sample = %(time_sample)s
-            ORDER BY period, 3, 2;
+            ORDER BY period, extract(doy from date), study_hour;
     """, args)
 
     #########################
     # financials
 
     # this just uses a dat file, not a table (and the values are not in a database for now)
-    # print 'writing financials.dat'
-    # with open('financials.dat', 'w') as f:
-    #     f.writelines([
-    #         'param ' + name + ' := ' + str(args[name]) + ';\n' 
-    #         for name in ['base_financial_year', 'interest_rate', 'discount_rate']
-    #     ])
     write_dat_file(
         'financials.dat',
         ['base_financial_year', 'interest_rate', 'discount_rate'],
@@ -143,37 +138,83 @@ def write_tables(**args):
             FROM existing_plants 
             WHERE aer_fuel_code NOT IN (SELECT fuel_type FROM fuel_costs)
                 AND load_zone in %(load_zones)s
-                AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s);
+                AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND technology NOT IN %(exclude_technologies)s;
     """, args)
 
-    # TODO: tabulate CO2 intensity of fuels
+    # gather info on fuels
     write_table('fuels.tab', """
-        SELECT DISTINCT fuel_type AS fuel, 0.0 AS co2_intensity, 0.0 AS upstream_co2_intensity
-        FROM fuel_costs
-        WHERE load_zone in %(load_zones)s;
+        SELECT DISTINCT c.fuel_type AS fuel, co2_intensity, 0.0 AS upstream_co2_intensity, rps_eligible
+        FROM fuel_costs c JOIN energy_source_properties p on (p.energy_source = c.fuel_type)
+        WHERE load_zone in %(load_zones)s AND fuel_scen_id=%(fuel_scen_id)s;
     """, args)
-        
+
+    #########################
+    # rps targets
+    
+    write_tab_file(
+        'rps_targets.tab', 
+        headers=('year', 'rps_target'), 
+        data=[(y, args['rps_targets'][y]) for y in sorted(args['rps_targets'].keys())],
+        arguments=args
+    )
+
     #########################
     # fuel_markets
 
     # TODO: get monthly fuel costs from Karl Jandoc spreadsheet
 
-    write_table('fuel_cost.tab', """
-        SELECT load_zone, fuel_type as fuel, period, 
-            price_mmbtu * power(1.0+%(inflation_rate)s, %(base_financial_year)s-c.year) as fuel_cost 
+    # # simple fuel markets with no LNG expansion options
+    # write_table('fuel_cost.tab', """
+    #     SELECT load_zone, fuel_type as fuel, period,
+    #         price_mmbtu * power(1.0+%(inflation_rate)s, %(base_financial_year)s-c.year) as fuel_cost
+    #     FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
+    #     WHERE load_zone in %(load_zones)s
+    #         AND fuel_scen_id = %(fuel_scen_id)s
+    #         AND p.time_sample = %(time_sample)s
+    #     ORDER BY 1, 2, 3;
+    # """, args)
+
+    write_table('regional_fuel_markets.tab', """
+        SELECT DISTINCT concat('Hawaii_', fuel_type) AS regional_fuel_market, fuel_type AS fuel 
+        FROM fuel_costs
+        WHERE load_zone in %(load_zones)s AND fuel_scen_id = %(fuel_scen_id)s;
+    """, args)
+
+    if args['fuel_scen_id'] in ('1', '2', '3'):
+        inflator = 'power(1.0+%(inflation_rate)s, %(base_financial_year)s-c.year)'
+    elif args['fuel_scen_id'].startswith('EIA'):
+        inflator = 'power(1.0+%(inflation_rate)s, %(base_financial_year)s-2013)'
+    else:
+        inflator = '1.0'
+
+    write_table('fuel_supply_curves.tab', """
+        SELECT concat('Hawaii_', fuel_type) as regional_fuel_market, fuel_type as fuel, 
+            period,
+            tier, 
+            price_mmbtu * {inflator} as unit_cost,
+            CASE WHEN fuel_type='LNG' AND tier='bulk' THEN %(bulk_lng_limit)s ELSE NULL END AS max_avail_at_cost,
+            CASE WHEN fuel_type='LNG' AND tier='bulk' THEN %(bulk_lng_fixed_cost)s ELSE 0.0 END AS fixed_cost
         FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
-        WHERE load_zone in %(load_zones)s 
+        WHERE load_zone in %(load_zones)s
             AND fuel_scen_id = %(fuel_scen_id)s
             AND p.time_sample = %(time_sample)s
         ORDER BY 1, 2, 3;
+    """.format(inflator=inflator), args)
+
+    write_table('lz_to_regional_fuel_market.tab', """
+        SELECT DISTINCT load_zone, concat('Hawaii_', fuel_type) AS regional_fuel_market 
+        FROM fuel_costs 
+        WHERE load_zone in %(load_zones)s AND fuel_scen_id = %(fuel_scen_id)s;
     """, args)
+
+    # TODO: (when multi-island) add fuel_cost_adders for each zone
 
 
     #########################
     # gen_tech
 
     # TODO: provide reasonable retirement ages for existing plants (not 100+base age)
-    # TODO: rename/drop the DistPV_peak and DistPV_flat technologies in the generator_costs table
     # note: this zeroes out variable_o_m for renewable projects
     # TODO: find out where variable_o_m came from for renewable projects and put it in the right place
     # TODO: fix baseload flag in the database
@@ -186,15 +227,22 @@ def write_tables(**args):
     # Switch-Hawaii/data/HECO\ IRP\ Report/IRP-2013-App-K-Supply-Side-Resource-Assessment-062813-Filed.pdf
     # and then incorporate those into unit_sizes.tab below.
     # NOTE: this converts variable o&m from $/kWh to $/MWh
-    # NOTE: for now we turn off the baseload flag for all gens, to allow for a 100% RPS
     # NOTE: we don't provide the following in this version:
     # g_min_build_capacity
     # g_ccs_capture_efficiency, g_ccs_energy_load,
     # g_storage_efficiency, g_store_to_release_ratio
+
+    # NOTE: for all energy sources other than 'SUN' and 'WND' (i.e., all fuels),
+    # We report the fuel as 'multiple' and then provide data in a multi-fuel table.
+    # Some of these are actually single-fuel, but this approach is simpler than sorting
+    # them out within each query, and it doesn't add any complexity to the model.
+    
+    # TODO: maybe replace "fuel IN ('SUN', 'WND', 'MSW')" with "fuel not in (SELECT fuel FROM fuel_cost)"
+    # TODO: convert 'MSW' to a proper fuel, possibly with a negative cost, instead of ignoring it
             
     write_table('generator_info.tab', """
-        SELECT  replace(technology,'DistPV_peak', 'DistPV') as generation_technology, 
-                replace(technology,'DistPV_peak', 'DistPV') as g_dbid,
+        SELECT  technology as generation_technology, 
+                technology as g_dbid,
                 max_age_years as g_max_age, 
                 scheduled_outage_rate as g_scheduled_outage_rate, 
                 forced_outage_rate as g_forced_outage_rate,
@@ -204,12 +252,11 @@ def write_tables(**args):
                 0 as g_is_cogen,
                 0 as g_competes_for_space, 
                 CASE WHEN fuel IN ('SUN', 'WND') THEN 0 ELSE variable_o_m * 1000.0 END AS g_variable_o_m,
-                fuel AS g_energy_source,
-                CASE WHEN fuel IN (SELECT fuel_type FROM fuel_costs) THEN 0.001*heat_rate ELSE null END
-                    AS g_full_load_heat_rate,
+                CASE WHEN fuel IN ('SUN', 'WND', 'MSW') THEN fuel ELSE 'multiple' END AS g_energy_source,
+                CASE WHEN fuel IN ('SUN', 'WND', 'MSW') THEN null ELSE 0.001*heat_rate END AS g_full_load_heat_rate,
                 null AS g_unit_size
             FROM generator_costs
-            WHERE technology NOT IN ('DistPV_flat')
+            WHERE technology NOT IN %(exclude_technologies)s
                 AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
         UNION SELECT
                 g.technology as generation_technology, 
@@ -219,25 +266,62 @@ def write_tables(**args):
                 g.scheduled_outage_rate as g_scheduled_outage_rate, 
                 g.forced_outage_rate as g_forced_outage_rate,
                 g.variable as g_is_variable, 
-                0 as g_is_baseload,
+                g.baseload as g_is_baseload,
                 0 as g_is_flexible_baseload, 
                 g.cogen as g_is_cogen,
                 g.competes_for_space as g_competes_for_space, 
                 CASE WHEN MIN(p.aer_fuel_code) IN ('SUN', 'WND') THEN 0.0 ELSE AVG(g.variable_o_m) * 1000.0 END 
                     AS g_variable_o_m,
-                MIN(p.aer_fuel_code) AS g_energy_source,
-                CASE WHEN MIN(p.aer_fuel_code) IN (SELECT fuel_type FROM fuel_costs) 
-                    THEN 0.001*ROUND(SUM(p.heat_rate*p.avg_mw)/SUM(p.avg_mw)) 
-                    ELSE null 
-                    END 
-                    AS g_full_load_heat_rate,
+                CASE WHEN MIN(p.aer_fuel_code) IN ('SUN', 'WND', 'MSW') THEN MIN(p.aer_fuel_code) ELSE 'multiple' END AS g_energy_source,
+                CASE WHEN MIN(p.aer_fuel_code) IN ('SUN', 'WND', 'MSW') THEN null 
+                    ELSE 0.001*SUM(p.heat_rate*p.avg_mw)/SUM(p.avg_mw) 
+                    END AS g_full_load_heat_rate,
                 AVG(peak_mw) AS g_unit_size  -- minimum block size for unit commitment
             FROM existing_plants_gen_tech g JOIN existing_plants p USING (technology)
             WHERE p.load_zone in %(load_zones)s
                 AND p.insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND g.technology NOT IN %(exclude_technologies)s
             GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
         ORDER BY 1;
     """, args)
+
+    # This gets a list of all the fueled projects (listed as "multiple" energy sources above),
+    # and lists them as accepting any equivalent or lighter fuel. (However, cogen plants and plants 
+    # using fuels with rank 0 are not changed.) Fuels are also filtered against the list of fuels with
+    # costs reported for the current scenario, so this can end up re-mapping one fuel in the database
+    # (e.g., LSFO) to a similar fuel in the scenario (e.g., LSFO-Diesel-Blend), even if the original fuel
+    # doesn't exist in the fuel_costs table. This can also be used to remap different names for the same
+    # fuel (e.g., "COL" in the plant definition and "Coal" in the fuel_costs table, both with the same
+    # fuel_rank).
+    write_indexed_set_dat_file('gen_multiple_fuels.dat', 'G_MULTI_FUELS', """
+        WITH all_techs AS (
+            SELECT
+                technology as generation_technology,
+                fuel as orig_fuel,
+                0 as cogen
+            FROM generator_costs c
+            WHERE min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND technology NOT IN %(exclude_technologies)s
+            UNION DISTINCT
+            SELECT DISTINCT
+                g.technology as generation_technology, 
+                p.aer_fuel_code as orig_fuel,
+                g.cogen
+            FROM existing_plants_gen_tech g JOIN existing_plants p USING (technology)
+            WHERE p.load_zone in %(load_zones)s
+                AND p.insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND g.technology NOT IN %(exclude_technologies)s
+        ), all_fueled_techs AS (
+            SELECT * from all_techs WHERE orig_fuel NOT IN ('SUN', 'WND', 'MSW')
+        )
+        SELECT DISTINCT generation_technology, b.energy_source as fuel
+        FROM all_fueled_techs t 
+            JOIN energy_source_properties a ON a.energy_source = t.orig_fuel
+            JOIN energy_source_properties b ON b.fuel_rank >= a.fuel_rank AND
+                (a.fuel_rank > 0 OR a.energy_source = b.energy_source)    -- 0-rank can't change fuels
+            WHERE b.energy_source IN (SELECT fuel_type FROM fuel_costs WHERE fuel_scen_id = %(fuel_scen_id)s);
+    """, args)
+
 
     # TODO: write code in project.unitcommit.commit to load part-load heat rates
     # TODO: get part-load heat rates for new plant technologies and report them in 
@@ -247,30 +331,31 @@ def write_tables(**args):
     # NOTE: we divide heat rate by 1000 to convert from Btu/kWh to MBtu/MWh
 
 
+    inflator = "power(1.0 + CASE fuel"
+    if 'wind_capital_cost_escalator' in args or 'pv_capital_cost_escalator' in args:
+        if 'wind_capital_cost_escalator' in args:
+            inflator += " WHEN 'WND' THEN %(wind_capital_cost_escalator)s"
+        if 'pv_capital_cost_escalator' in args:
+            inflator += " WHEN 'SUN' THEN %(pv_capital_cost_escalator)s"
+        inflator += ' ELSE 0.0 END, period - %(base_financial_year)s)'
+    else:
+        inflator = "1.0"
+
     # note: this table can only hold costs for technologies with future build years,
     # so costs for existing technologies are specified in project_specific_costs.tab
     # NOTE: costs in this version of switch are expressed in $/MW, $/MW-year, etc., not per kW.
     write_table('gen_new_build_costs.tab', """
         SELECT  
-            replace(technology,'DistPV_peak', 'DistPV') as generation_technology, 
+            technology as generation_technology, 
             period AS investment_period,
-            capital_cost_per_kw *1000.0 AS g_overnight_cost, 
+            capital_cost_per_kw * 1000.0 * {inflator} AS g_overnight_cost, 
             fixed_o_m*1000.0 AS g_fixed_o_m
         FROM generator_costs, study_periods
-        WHERE technology NOT IN ('DistPV_flat')
+        WHERE technology NOT IN %(exclude_technologies)s
             AND time_sample = %(time_sample)s
             AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
         ORDER BY 1, 2;
-    """, args)
-        # UNION
-        # SELECT technology AS generation_technology, 
-        #         insvyear AS investment_period, 
-        #         sum(overnight_cost * 1000.0 * peak_mw) / sum(peak_mw) as g_overnight_cost,
-        #         sum(fixed_o_m * 1000.0 * peak_mw) / sum(peak_mw) as g_fixed_o_m
-        # FROM existing_plants
-        # WHERE load_zone in %(load_zones)s
-        #     AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
-        # GROUP BY 1, 2
+    """.format(inflator=inflator), args)
 
 
 
@@ -304,7 +389,7 @@ def write_tables(**args):
 
     write_table('project_info.tab', """
             -- make a list of all projects with detailed definitions (and gather the available data)
-            DO $$ BEGIN PERFORM drop_temporary_table('t_specific_projects'); END $$;
+            DROP TABLE IF EXISTS t_specific_projects;
             CREATE TEMPORARY TABLE t_specific_projects AS
                 SELECT 
                     concat_ws('_', 
@@ -320,7 +405,7 @@ def write_tables(**args):
                 FROM connect_cost c FULL JOIN max_capacity m USING (load_zone, technology, site, orientation);
 
             -- make a list of generic projects (for which no detailed definitions are available)
-            DO $$ BEGIN PERFORM drop_temporary_table('t_generic_projects'); END $$;
+            DROP TABLE IF EXISTS t_generic_projects;
             CREATE TEMPORARY TABLE t_generic_projects AS
                 SELECT 
                     concat_ws('_', load_zone, technology) AS "PROJECT",
@@ -333,7 +418,7 @@ def write_tables(**args):
                 WHERE g.technology NOT IN (SELECT proj_gen_tech FROM t_specific_projects);
         
             -- merge the specific and generic projects
-            DO $$ BEGIN PERFORM drop_temporary_table('t_all_projects'); END $$;
+            DROP TABLE IF EXISTS t_all_projects;
             CREATE TEMPORARY TABLE t_all_projects AS
             SELECT * FROM t_specific_projects UNION SELECT * from t_generic_projects;
         
@@ -349,6 +434,7 @@ def write_tables(**args):
             FROM t_all_projects a JOIN generator_costs g on g.technology=a.proj_gen_tech
             WHERE a.proj_load_zone IN %(load_zones)s
                 AND g.min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND g.technology NOT IN %(exclude_technologies)s
             UNION
             -- collect data on existing projects
             SELECT DISTINCT 
@@ -363,6 +449,7 @@ def write_tables(**args):
             FROM existing_plants
             WHERE load_zone IN %(load_zones)s
                 AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND technology NOT IN %(exclude_technologies)s
             GROUP BY 1, 2, 3, 4, 5, 6
             ORDER BY 4, 3, 1;
     """, args)
@@ -375,6 +462,7 @@ def write_tables(**args):
         FROM existing_plants
         WHERE load_zone in %(load_zones)s
             AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+            AND technology NOT IN %(exclude_technologies)s
         GROUP BY 1, 2;
     """, args)
 
@@ -389,6 +477,7 @@ def write_tables(**args):
         FROM existing_plants
         WHERE load_zone in %(load_zones)s
             AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+            AND technology NOT IN %(exclude_technologies)s
         GROUP BY 1, 2;
     """, args)
 
@@ -409,6 +498,7 @@ def write_tables(**args):
                 JOIN study_hour h using (date_time)
             WHERE load_zone in %(load_zones)s and time_sample = %(time_sample)s
                 AND min_vintage_year <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND g.technology NOT IN %(exclude_technologies)s
             UNION 
             SELECT 
                 c.project_id as "PROJECT", 
@@ -420,6 +510,7 @@ def write_tables(**args):
                 AND c.load_zone in %(load_zones)s
                 AND h.time_sample = %(time_sample)s
                 AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND p.technology NOT IN %(exclude_technologies)s
             ORDER BY 1, 2
         """, args)
 
@@ -451,6 +542,8 @@ def write_tables(**args):
             FROM existing_plants, study_hour
             WHERE load_zone in %(load_zones)s
                 AND time_sample = %(time_sample)s
+                AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+                AND technology NOT IN %(exclude_technologies)s
         ) AS the_data
         WHERE proj_min_commit_fraction IS NOT NULL OR proj_max_commit_fraction IS NOT NULL OR proj_min_load_fraction IS NOT NULL;
     """, args)
@@ -472,6 +565,7 @@ def write_tables(**args):
     #     FROM existing_plants
     #     WHERE load_zone in %(load_zones)s
     #        AND insvyear <= (SELECT MAX(period) FROM study_periods WHERE time_sample = %(time_sample)s)
+    #        AND technology NOT IN %(exclude_technologies)s
     #     GROUP BY 1
     #     ORDER by 1;
     # """, args)
@@ -520,7 +614,7 @@ def write_tables(**args):
     # TODO: put these data in a database and write a .tab file instead
     write_dat_file(
         'batteries.dat',
-        [x for x in args if x.startswith('battery_')],
+        [k for k in args if k.startswith('battery_')],
         args
     )
 
@@ -537,18 +631,60 @@ def write_tables(**args):
 
     #########################
     # pumped hydro
-    # TODO: put these data in a database and write a .tab file instead
-    write_dat_file(
-        'pumped_hydro.dat',
-        [x for x in args if x.startswith('pumped_hydro_')],
-        args
+    # TODO: put these data in a database with hydro_scen_id's and pull them from there
+    
+    write_tab_file(
+        'pumped_hydro.tab',
+        headers=args["pumped_hydro_headers"],
+        data=args["pumped_hydro_projects"],
+        arguments=args
     )
 
+    # write_dat_file(
+    #     'pumped_hydro.dat',
+    #     [k for k in args if k.startswith('pumped_hydro_')],
+    #     args
+    # )
+
+# the two functions below could be used as the start of a system
+# to write placeholder files for any files in the current scenario 
+# that match the base files. This could be used to avoid creating large
+# files (variable_cap_factor.tab) for alternative scenarios that are 
+# otherwise very similar. i.e., placeholder .tab or .dat files could 
+# be written with just the line 'include ../variable_cap_factor.tab' or 
+# 'include ../financial.dat'.
+
+def any_alt_args_in_list(args, l):
+    """Report whether any arguments in the args list appear in the list l."""
+    for a in args.get('alt_args', {}):
+        if a in l:
+            return True
+    return False
+    
+def any_alt_args_in_query(args, query):
+    """Report whether any arguments in the args list appear in the list l."""
+    for a in args.get('alt_args', {}):
+        if '%(' + a + ')s' in query:
+            return True
+    return False    
+
+def make_file_path(file, args):
+    """Create any directories and subdirectories needed to store data in the specified file,
+    based on inputs_dir and inputs_subdir arguments. Return a pathname to the file."""
+    # extract extra path information from args (if available)
+    # and build a path to the specified file.
+    path = os.path.join(args.get('inputs_dir', ''), args.get('inputs_subdir', ''))
+    if path != '' and not os.path.exists(path):
+        os.makedirs(path)
+    path = os.path.join(path, file)
+    return path
 
 def write_dat_file(output_file, args_to_write, arguments):
     """ write a simple .dat file with the arguments specified in args_to_write, 
     drawn from the arguments dictionary"""
+    
     if any(arg in arguments for arg in args_to_write):
+        output_file = make_file_path(output_file, arguments)
         print "Writing {file} ...".format(file=output_file),
         sys.stdout.flush()  # display the part line to the user
         start=time.time()
@@ -561,21 +697,8 @@ def write_dat_file(output_file, args_to_write, arguments):
         
         print "time taken: {dur:.2f}s".format(dur=time.time()-start)
 
-def write_tab_file(output_file, headers, data):
-    "Write a tab file using the headers and data supplied."
-
-    print "Writing {file} ...".format(file=output_file),
-    sys.stdout.flush()  # display the part line to the user
-
-    start=time.time()
-
-    with open(output_file, 'w') as f:
-        writerow(f, headers)
-        writerows(f, data)
-
-    print "time taken: {dur:.2f}s".format(dur=time.time()-start)
-
 def write_table(output_file, query, arguments):
+    output_file = make_file_path(output_file, arguments)
     cur = con.cursor()
 
     print "Writing {file} ...".format(file=output_file),
@@ -591,6 +714,58 @@ def write_table(output_file, query, arguments):
         writerows(f, cur)
 
     print "time taken: {dur:.2f}s".format(dur=time.time()-start)
+
+def write_tab_file(output_file, headers, data, arguments):
+    "Write a tab file using the headers and data supplied."
+    output_file = make_file_path(output_file, arguments)
+
+    print "Writing {file} ...".format(file=output_file),
+    sys.stdout.flush()  # display the part line to the user
+
+    start=time.time()
+
+    with open(output_file, 'w') as f:
+        writerow(f, headers)
+        writerows(f, data)
+
+    print "time taken: {dur:.2f}s".format(dur=time.time()-start)
+
+
+def write_indexed_set_dat_file(output_file, set_name, query, arguments):
+    """Write a .dat file defining an indexed set, based on the query provided.
+    
+    Note: the query should produce a table with index values in all columns except
+    the last, and then set members for each index in the last column. (There should
+    be multiple rows with the same values in the index columns.)"""
+
+    output_file = make_file_path(output_file, arguments)
+    print "Writing {file} ...".format(file=output_file),
+    sys.stdout.flush()  # display the part line to the user
+
+    start=time.time()
+
+    cur = con.cursor()
+    cur.execute(dedent(query), arguments)
+    
+    # build a dictionary grouping all values (last column) according to their index keys (earlier columns)
+    data_dict = collections.defaultdict(list)
+    for r in cur:
+        # note: data_dict[(index vals)] is created as an empty list on first reference,
+        # then gets data from all matching rows appended to it
+        data_dict[tuple(r[:-1])].append(r[-1])
+
+    # .dat file format based on p. 161 of http://ampl.com/BOOK/CHAPTERS/12-data.pdf
+    with open(output_file, 'w') as f:
+        f.writelines([
+            'set {sn}[{idx}] := {items} ;\n'.format(
+                sn=set_name, 
+                idx=', '.join(k),
+                items=' '.join(v))
+            for k, v in data_dict.iteritems()
+        ])
+
+    print "time taken: {dur:.2f}s".format(dur=time.time()-start)
+
 
 def stringify(val):
     if val is None:

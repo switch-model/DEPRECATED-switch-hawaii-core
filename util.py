@@ -36,10 +36,31 @@ def append_table(model, *indexes, **kwargs):
     with open(output_file, 'ab') as f:
         w = csv.writer(f, dialect="ampl-tab")
         # write the data
+        # import pdb
+        # if 'rfm' in output_file:
+        #     pdb.set_trace()
         w.writerows(
-            tuple(value(v) for v in values(model, *x)) 
+            tuple(value(v) for v in values(model, *unpack_elements(x))) 
             for x in idx
         )
+
+def unpack_elements(tup):
+    """Unpack any multi-element objects within tup, to make a single flat tuple.
+    Note: this is not recursive.
+    This is used to flatten the product of a multi-dimensional index with anything else."""
+    l=[]
+    for t in tup:
+        if isinstance(t, basestring):
+            l.append(t)
+        else:
+            try:
+                # check if it's iterable
+                iterator = iter(t)
+                for i in iterator:
+                    l.append(i)
+            except TypeError:
+                l.append(t)
+    return tuple(l)
 
 def write_table(model, *indexes, **kwargs):
     """Write an output table in one shot - headers and body."""
@@ -67,3 +88,5 @@ def tic():
 
 def toc():
     log("time taken: {dur:.2f}s\n".format(dur=time.time()-tic.start_time))
+
+
