@@ -318,7 +318,7 @@ def write_tables(**args):
         FROM all_fueled_techs t 
             JOIN energy_source_properties a ON a.energy_source = t.orig_fuel
             JOIN energy_source_properties b ON b.fuel_rank >= a.fuel_rank AND
-                ((a.fuel_rank > 0 AND t.cogen = 0) OR a.energy_source = b.energy_source)    -- 0-rank or cogen can't change fuels
+                (a.fuel_rank > 0 OR a.energy_source = b.energy_source)    -- 0-rank can't change fuels
             WHERE b.energy_source IN (SELECT fuel_type FROM fuel_costs WHERE fuel_scen_id = %(fuel_scen_id)s);
     """, args)
 
@@ -633,18 +633,18 @@ def write_tables(**args):
     # pumped hydro
     # TODO: put these data in a database with hydro_scen_id's and pull them from there
     
-    # write_tab_file(
-    #     'pumped_hydro.tab'
-    #     headers=args["pumped_hydro_headers"],
-    #     data=args["pumped_hydro_data"]
-    #     arguments=args
-    # )
-
-    write_dat_file(
-        'pumped_hydro.dat',
-        [k for k in args if k.startswith('pumped_hydro_')],
-        args
+    write_tab_file(
+        'pumped_hydro.tab',
+        headers=args["pumped_hydro_headers"],
+        data=args["pumped_hydro_projects"],
+        arguments=args
     )
+
+    # write_dat_file(
+    #     'pumped_hydro.dat',
+    #     [k for k in args if k.startswith('pumped_hydro_')],
+    #     args
+    # )
 
 # the two functions below could be used as the start of a system
 # to write placeholder files for any files in the current scenario 
