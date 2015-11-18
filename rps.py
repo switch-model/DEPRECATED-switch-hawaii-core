@@ -27,7 +27,9 @@ def define_components(m):
     m.rps_target_for_period = Param(m.PERIODS, initialize=rps_target_for_period_rule)
 
     # maximum share of (bio)fuels in rps
-    m.rps_fuel_limit = Param(default=float("inf"), mutable=True)
+    # note: using Infinity as the upper limit causes the solution to take forever
+    # m.rps_fuel_limit = Param(default=float("inf"), mutable=True)
+    m.rps_fuel_limit = Param(default=1.0, mutable=True)
 
     # Note: this rule ignores pumped hydro, so it could be gamed by producing extra 
     # RPS-eligible power and burning it off in storage losses; on the other hand, 
