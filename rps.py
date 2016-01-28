@@ -78,6 +78,20 @@ def define_components(m):
     )
 
     # Don't allow (bio)fuels to provide more than a certain percentage of the system's energy
+    # But note: when the system really wants to use more biofuel, this can be "gamed" by
+    # cycling power through batteries or transmission lines to burn off some extra non-fuel energy,
+    # allowing more biofuel into the system. One solution would be to only apply the RPS to
+    # the predefined load (not generation), but then transmission and battery losses could be
+    # served by fossil fuels.
+    # Alternatively: limit fossil fuels to (1-rps) * standard loads 
+    # and limit biofuels to (1-bio)*standard loads. This would force renewables to be used for
+    # all losses, which is slightly inaccurate.
+    # Also note: this problem may go away when the RPS and fuel limite are weighted correctly;
+    # at present, peak days get small weight for costs and large weight for fuel limit, so there's
+    # an excessive incentive to increase non-fuel renewable consumption on these days.
+    # TODO: fix the problems noted above; for now we don't worry too much because the cost of
+    # burning up excess RE in batteries in order to incorporate more biofuel is very high, and
+    # it mainly occurs in scenarios with no other options (no demand response, no hydrogen, etc.)
     m.RPS_Fuel_Cap = Constraint(m.PERIODS, rule = lambda m, per:
         sum(
             m.DispatchProjByFuel[p, t, f] 
