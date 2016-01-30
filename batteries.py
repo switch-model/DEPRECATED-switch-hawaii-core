@@ -42,7 +42,7 @@ def define_components(m):
         m.battery_capital_cost_per_mwh_capacity * m.interest_rate
     )
 
-    # amount of battery capacity to build and use
+    # amount of battery capacity to build and use (in MWh)
     # TODO: integrate this with other project data, so it can contribute to reserves, etc.
     m.BuildBattery = Var(m.LOAD_ZONES, m.PERIODS, within=NonNegativeReals)
     m.Battery_Capacity = Expression(m.LOAD_ZONES, m.PERIODS, rule=lambda m, z, p:
