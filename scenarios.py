@@ -1,5 +1,22 @@
 import argparse, os, collections, fcntl
 
+try:
+    import fcntl
+    def flock(f):
+        fcntl.flock(f, fcntl.LOCK_EX)
+    def funlock(f):
+        fcntl.flock(f, fcntl.LOCK_UN)
+except ImportError:
+    # probably using windows
+    # rely on opportunistic file writing (hope that scenarios aren't 
+    # added to completed_scenarios.txt at the same time by parallel processes)
+    # TODO: add support for file locking on windows, e.g., like
+    # https://www.safaribooksonline.com/library/view/python-cookbook/0596001673/ch04s25.html
+    def flock(f):
+        pass
+    def funlock(f):
+        pass
+
 def iterify(item):
     """Return an iterable for the one or more items passed."""
     if isinstance(item, basestring):
@@ -105,9 +122,9 @@ def get_standard_scenarios_dict():
     # if the standard list is changed during a long solution effort.
     with open('scenarios_to_run.txt', 'r') as f:
         # wait for exclusive access to the file (to avoid reading while the file is being changed)
-        fcntl.flock(f, fcntl.LOCK_EX)
+        flock(f)
         scenarios_list = list(f.read().splitlines())    # note: ignores presence/absence of \n at end of file
-        fcntl.flock(f, fcntl.LOCK_UN)
+        funlock(f)
     args_list = [args_dict(s.split(' ')) for s in scenarios_list]
     return collections.OrderedDict([(s["scenario_name"], s) for s in args_list])
         
@@ -132,7 +149,7 @@ def scenario_already_run(scenario):
     Return False if it wasn't there already."""
     with open('completed_scenarios.txt', 'a+') as f:
         # wait for exclusive access to the list (to avoid writing the same scenario twice in a race condition)
-        fcntl.flock(f, fcntl.LOCK_EX)
+        flock(f)
         # file starts with pointer at end; move to start
         f.seek(0, 0)                    
         if scenario + '\n' in f:
@@ -141,5 +158,5 @@ def scenario_already_run(scenario):
             already_run = False
             # append name to the list (will always go at end, because file was opened in 'a' mode)
             f.write(scenario + '\n')
-        fcntl.flock(f, fcntl.LOCK_UN)
+        funlock(f)
     return already_run
