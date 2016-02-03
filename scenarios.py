@@ -1,4 +1,4 @@
-import argparse, os, collections, fcntl
+import argparse, os, collections
 
 try:
     import fcntl
@@ -47,7 +47,7 @@ class AddListAction(argparse.Action):
 
 # define a standard argument parser, which can be used to setup scenarios
 # NOTE: you can't safely use default values here, because those end up being
-# assigned to cmd_line_args(), and then they override an values set for the
+# assigned to cmd_line_args(), and then they override any values set for the
 # standard scenarios.
 parser = argparse.ArgumentParser(description='Solve one or more Switch-Hawaii scenarios.')
 parser.add_argument('--inputs', dest='inputs_dir')
