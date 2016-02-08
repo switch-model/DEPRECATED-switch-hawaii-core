@@ -2,9 +2,6 @@ import time, sys, collections, os
 from textwrap import dedent
 import psycopg2
 
-# TODO: set this up to use ssl certificates or an SSH tunnel, because
-# otherwise postgres sends the password over the network as clear text.
-
 # NOTE: instead of using the python csv writer, this directly writes tables to 
 # file in the pyomo .tab format. This uses tabs between columns and the standard
 # line break for the system it is run on. This does the following translations (only):
@@ -16,23 +13,6 @@ import psycopg2
 
 # NOTE: this does not use the python csv writer because it doesn't support the quoting
 # or null behaviors described above.
-
-try:
-    pghost='redr.eng.hawaii.edu'
-    # note: the connection gets created when the module loads and never gets closed (until presumably python exits)
-    con = psycopg2.connect(database='switch', host=pghost) #, user='switch_user')
-    
-except psycopg2.OperationalError:
-    print dedent("""
-        ############################################################################################
-        Error while connecting to switch database on postgres server {server}.
-        Please ensure that the PGUSER environment variable is set with your postgres username
-        and there is a line like "*:*:*:<user>:<password>" in ~/.pgpass (which should be chmod 0600) 
-        or in %APPDATA%\postgresql\pgpass.conf (Windows).    
-        See http://www.postgresql.org/docs/9.1/static/libpq-pgpass.html for more details.
-        ############################################################################################
-        """.format(server=pghost))
-    raise
 
 
 # NOTE: ANSI SQL specifies single quotes for literal strings, and postgres conforms
@@ -696,6 +676,28 @@ def make_file_path(file, args):
     path = os.path.join(path, file)
     return path
 
+con = None
+def db_cursor():
+    global con
+    if con is None:
+        try:
+            pghost='redr.eng.hawaii.edu'
+            # note: the connection gets created when the module loads and never gets closed (until presumably python exits)
+            con = psycopg2.connect(database='switch', host=pghost) #, user='switch_user')
+    
+        except psycopg2.OperationalError:
+            print dedent("""
+                ############################################################################################
+                Error while connecting to switch database on postgres server {server}.
+                Please ensure that the PGUSER environment variable is set with your postgres username
+                and there is a line like "*:*:*:<user>:<password>" in ~/.pgpass (which should be chmod 0600) 
+                or in %APPDATA%\postgresql\pgpass.conf (Windows).    
+                See http://www.postgresql.org/docs/9.1/static/libpq-pgpass.html for more details.
+                ############################################################################################
+                """.format(server=pghost))
+            raise
+    return con.cursor()
+
 def write_dat_file(output_file, args_to_write, arguments):
     """ write a simple .dat file with the arguments specified in args_to_write, 
     drawn from the arguments dictionary"""
@@ -716,7 +718,7 @@ def write_dat_file(output_file, args_to_write, arguments):
 
 def write_table(output_file, query, arguments):
     output_file = make_file_path(output_file, arguments)
-    cur = con.cursor()
+    cur = db_cursor()
 
     print "Writing {file} ...".format(file=output_file),
     sys.stdout.flush()  # display the part line to the user
@@ -761,7 +763,7 @@ def write_indexed_set_dat_file(output_file, set_name, query, arguments):
 
     start=time.time()
 
-    cur = con.cursor()
+    cur = db_cursor()
     cur.execute(dedent(query), arguments)
     
     # build a dictionary grouping all values (last column) according to their index keys (earlier columns)
