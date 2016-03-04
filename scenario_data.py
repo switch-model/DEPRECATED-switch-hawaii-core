@@ -52,13 +52,22 @@ def write_tables(**args):
     # timescales
     
     write_table('periods.tab', """
+        WITH period_length as (
+            SELECT 
+                CASE WHEN max(period) = min(period) 
+                    THEN
+                        -- one-period model; assume length = number of days provided
+                        sum(ts_scale_to_period) / 365
+                    ELSE
+                        -- multi-period model; count number of years between periods
+                        (max(period)-min(period)) / (count(distinct period)-1)
+                END as length 
+                FROM study_date WHERE time_sample = %(time_sample)s
+        )
         SELECT period AS "INVESTMENT_PERIOD",
                 period as period_start,
-                period + (
-                    SELECT (max(period)-min(period)) / (count(distinct period)-1) as length 
-                        FROM study_periods WHERE time_sample = %(time_sample)s
-                    ) - 1 as period_end
-            FROM study_periods
+                period + length - 1 as period_end
+            FROM study_periods, period_length
             WHERE time_sample = %(time_sample)s
             ORDER by 1;
     """, args)
@@ -162,19 +171,20 @@ def write_tables(**args):
     #########################
     # fuel_markets
 
+
+    # simple fuel markets with no LNG expansion options (used by historical models)
     # TODO: get monthly fuel costs from Karl Jandoc spreadsheet
+    write_table('fuel_cost.tab', """
+        SELECT load_zone, fuel_type as fuel, period,
+            price_mmbtu * power(1.0+%(inflation_rate)s, %(base_financial_year)s-c.year) as fuel_cost
+        FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
+        WHERE load_zone in %(load_zones)s
+            AND fuel_scen_id = %(fuel_scen_id)s
+            AND p.time_sample = %(time_sample)s
+        ORDER BY 1, 2, 3;
+    """, args)
 
-    # # simple fuel markets with no LNG expansion options
-    # write_table('fuel_cost.tab', """
-    #     SELECT load_zone, fuel_type as fuel, period,
-    #         price_mmbtu * power(1.0+%(inflation_rate)s, %(base_financial_year)s-c.year) as fuel_cost
-    #     FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
-    #     WHERE load_zone in %(load_zones)s
-    #         AND fuel_scen_id = %(fuel_scen_id)s
-    #         AND p.time_sample = %(time_sample)s
-    #     ORDER BY 1, 2, 3;
-    # """, args)
-
+    # advanced fuel markets with LNG expansion options (used by forward-looking models)
     write_table('regional_fuel_markets.tab', """
         SELECT DISTINCT concat('Hawaii_', fuel_type) AS regional_fuel_market, fuel_type AS fuel 
         FROM fuel_costs
@@ -633,12 +643,13 @@ def write_tables(**args):
     # pumped hydro
     # TODO: put these data in a database with hydro_scen_id's and pull them from there
     
-    write_tab_file(
-        'pumped_hydro.tab',
-        headers=args["pumped_hydro_headers"],
-        data=args["pumped_hydro_projects"],
-        arguments=args
-    )
+    if "pumped_hydro_headers" in args:
+        write_tab_file(
+            'pumped_hydro.tab',
+            headers=args["pumped_hydro_headers"],
+            data=args["pumped_hydro_projects"],
+            arguments=args
+        )
 
     # write_dat_file(
     #     'pumped_hydro.dat',
