@@ -43,13 +43,18 @@ def define_components(m):
             else Constraint.Skip
     )
     
-    # only allow delivery from activated tiers
+    # only allow delivery from activated tiers 
+    # (and skip unlimited tiers to avoid a complaint by glpk about these)
+    # note: this could be merged with the previous constraint, since they are complementary
     m.Enforce_RFM_Supply_Tier_Activated = Constraint(
         m.RFM_SUPPLY_TIERS, 
         rule=lambda m, r, p, st:
-            m.FuelConsumptionByTier[r, p, st]
-            <=
-            m.RFMSupplyTierActivate[r, p, st] * m.rfm_supply_tier_limit[r, p, st])
+            (
+                m.FuelConsumptionByTier[r, p, st]
+                <=
+                m.RFMSupplyTierActivate[r, p, st] * m.rfm_supply_tier_limit[r, p, st]
+            ) if m.rfm_supply_tier_limit[r, p, st] < inf else Constraint.Skip
+    )
     
     # Eventually, when we add capital costs for capacity expansion, we will need a 
     # variable showing how much of each tier to build each period (and then the upper

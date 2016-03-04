@@ -4,6 +4,17 @@ from util import get
 
 def define_components(m):
     """Make various changes to the model to facilitate reporting and avoid unwanted behavior"""
+    # create a dictionary to hold configuration information for each model 
+    # (input/output dirs, scenario-specific values to be used by modules, etc.)
+    # note: pyomo already has a model.config dictionary, but using a different name
+    # avoids any conflicts.
+    m.switch_config=dict()
+    
+    # create a dictionary to hold configuration information for each model 
+    # (input/output dirs, scenario-specific values to be used by modules, etc.)
+    # note: pyomo already has a model.config dictionary, but using a different name
+    # avoids any conflicts.
+    m.switch_config=dict()
     
     # define an indexed set of all periods before or including the current one.
     # this is useful for calculations that must index over previous and current periods

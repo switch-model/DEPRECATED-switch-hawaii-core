@@ -36,41 +36,40 @@ def define_components(m):
     # it also neglects the (small) contribution from net flow of pumped hydro projects.
     # TODO: incorporate pumped hydro into this rule, maybe change the target to refer to 
     # sum(getattr(m, component)[lz, t] for lz in m.LOAD_ZONES) for component in m.LZ_Energy_Components_Produce)
-    # TODO: consider day weights in calculation
 
     # power production that can be counted toward the RPS each period
     m.RPSEligiblePower = Expression(m.PERIODS, rule=lambda m, per:
         sum(
-            m.DispatchProjByFuel[p, t, f] 
+            m.DispatchProjByFuel[p, tp, f] * m.tp_weight[tp]
                 for f in m.FUELS if f in m.RPS_ENERGY_SOURCES
                     for p in m.PROJECTS_BY_FUEL[f]
                         # could be accelerated a bit if we had m.ACTIVE_PERIODS_FOR_PROJECT[p]
-                        for t in m.PERIOD_TPS[per]
-                            if (p, t) in m.PROJ_DISPATCH_POINTS
+                        for tp in m.PERIOD_TPS[per]
+                            if (p, tp) in m.PROJ_DISPATCH_POINTS
         )
         +
         sum(
-            m.DispatchProj[p, t]
+            m.DispatchProj[p, tp] * m.tp_weight[tp]
                 for f in m.NON_FUEL_ENERGY_SOURCES if f in m.RPS_ENERGY_SOURCES
                     for p in m.PROJECTS_BY_NON_FUEL_ENERGY_SOURCE[f]
-                        for t in m.PERIOD_TPS[per]
-                            if (p, t) in m.PROJ_DISPATCH_POINTS
+                        for tp in m.PERIOD_TPS[per]
+                            if (p, tp) in m.PROJ_DISPATCH_POINTS
         )
         -
         # assume DumpPower is curtailed renewable energy
-        sum(m.DumpPower[lz, tp] for lz in m.LOAD_ZONES for tp in m.PERIOD_TPS[per])
+        sum(m.DumpPower[lz, tp] * m.tp_weight[tp] for lz in m.LOAD_ZONES for tp in m.PERIOD_TPS[per])
     )
 
     # total power production each period (against which RPS is measured)
     # (we subtract DumpPower, because that shouldn't have been produced in the first place)
     m.RPSTotalPower = Expression(m.PERIODS, rule=lambda m, per:
         sum(
-            m.DispatchProj[p, t] 
+            m.DispatchProj[p, tp] * m.tp_weight[tp]
                 for p in m.PROJECTS 
-                    for t in m.PERIOD_TPS[per] 
-                        if (p, t) in m.PROJ_DISPATCH_POINTS
+                    for tp in m.PERIOD_TPS[per] 
+                        if (p, tp) in m.PROJ_DISPATCH_POINTS
         )
-        - sum(m.DumpPower[lz, tp] for lz in m.LOAD_ZONES for tp in m.PERIOD_TPS[per])
+        - sum(m.DumpPower[lz, tp] * m.tp_weight[tp] for lz in m.LOAD_ZONES for tp in m.PERIOD_TPS[per])
     )
     
     m.RPS_Enforce = Constraint(m.PERIODS, rule=lambda m, per:
@@ -78,18 +77,38 @@ def define_components(m):
     )
 
     # Don't allow (bio)fuels to provide more than a certain percentage of the system's energy
-    m.RPS_Fuel_Cap = Constraint(m.PERIODS, rule = lambda m, per:
+    # Note: when the system really wants to use more biofuel, it is possible to "game" this limit by
+    # cycling power through batteries, pumped storage, transmission lines or the hydrogen system to
+    # burn off some 
+    # extra non-fuel energy, allowing more biofuel into the system. (This doesn't typically happen 
+    # with batteries due to high variable costs -- e.g., it has to cycle 4 kWh through a battery to
+    # consume 1 kWh of non-biofuel power, to allow 0.05 kWh of additional biofuel into the system. 
+    # Even if this can save $0.5/kWh, if battery cycling costs $0.15/kWh, that means $0.60 extra to
+    # save $0.025. It also doesn't happen in the hydrogen scenario, since storing intermittent power
+    # directly as hydrogen can directly displace biofuel consumption. But it could happen if batteries
+    # have low efficiency or low cycling cost, or if transmission losses are significant.)
+    # One solution would be to only apply the RPS to the predefined load (not generation), but then
+    # transmission and battery losses could be served by fossil fuels.
+    # Alternatively: limit fossil fuels to (1-rps) * standard loads 
+    # and limit biofuels to (1-bio)*standard loads. This would force renewables to be used for
+    # all losses, which is slightly inaccurate.
+    # TODO: fix the problem noted above; for now we don't worry too much because there are no
+    # transmission losses, the cycling costs for batteries are too high and pumped storage is only
+    # adopted on a small scale.
+    
+    m.RPSFuelPower = Expression(m.PERIODS, rule=lambda m, per:
         sum(
-            m.DispatchProjByFuel[p, t, f] 
+            m.DispatchProjByFuel[p, tp, f] * m.tp_weight[tp]
                 for f in m.FUELS if m.f_rps_eligible[f]
                     for p in m.PROJECTS_BY_FUEL[f]
                         # could be accelerated a bit if we had m.ACTIVE_PERIODS_FOR_PROJECT[p]
-                        for t in m.PERIOD_TPS[per]
-                            if (p, t) in m.PROJ_DISPATCH_POINTS
+                        for tp in m.PERIOD_TPS[per]
+                            if (p, tp) in m.PROJ_DISPATCH_POINTS
         )
-        <= m.rps_fuel_limit * m.RPSTotalPower[per]
     )
-
+    m.RPS_Fuel_Cap = Constraint(m.PERIODS, rule = lambda m, per:
+        m.RPSFuelPower[per] <= m.rps_fuel_limit * m.RPSTotalPower[per]
+    )
 
 
 def load_inputs(m, switch_data, inputs_dir):

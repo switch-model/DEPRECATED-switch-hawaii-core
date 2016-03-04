@@ -3,6 +3,24 @@ from pyomo.environ import *
 
 def define_components(m):
     
+    # It's not clear how best to model battery cell replacement
+    # One option: facility has a specific life, and variable O&M builds up a replacement fund for
+    # intermediate cell replacement (but there's no extra salvage value from this?)?
+
+    # Should battery facilities be priced per MW (power conversion) and per MWh (cells)?
+    # Should we switch to modeling batteries with standard cost components - 
+    # capital, fixed O&M, variable O&M (which includes the cost of any early replacements)?
+    # note: sodium sulfur is widely reported to have 15-year calendar life (due to corrosion at
+    # high temperatures) and 4500 cycle life (which can be much longer with shallow cycles, much 
+    # shorter with deep cycles). So one cycle per day comes for "free" (i.e., is included in the 
+    # capital cost), but if there are two cycles per day, there should be a higher cost, included 
+    # in the variable O&M. This is tricky to model. If there were no limit on the calendar life,
+    # we could omit the cell cost from fixed O&M and include it entirely in variable O&M. But then
+    # it looks like you can get a high-capacity low-usage system for cheap (i.e., you ignore the
+    # money tied up in the system while you wait to use it). So maybe my current approach is best:
+    # only pay interest on the system (not full cost recovery), and pay into a fund every time you
+    # use the battery, so on average you can always have a refurbished battery on hand.
+    
     # battery capital cost
     m.battery_capital_cost_per_mwh_capacity = Param()
     # number of full cycles the battery can do; we assume shallower cycles do proportionally less damage
@@ -24,7 +42,7 @@ def define_components(m):
         m.battery_capital_cost_per_mwh_capacity * m.interest_rate
     )
 
-    # amount of battery capacity to build and use
+    # amount of battery capacity to build and use (in MWh)
     # TODO: integrate this with other project data, so it can contribute to reserves, etc.
     m.BuildBattery = Var(m.LOAD_ZONES, m.PERIODS, within=NonNegativeReals)
     m.Battery_Capacity = Expression(m.LOAD_ZONES, m.PERIODS, rule=lambda m, z, p:

@@ -41,8 +41,9 @@ def define_components(m):
     )
         
     # add cost components to account for the vehicle miles traveled via EV or ICE
-    m.cost_components_annual.append('ev_extra_annual_cost')
-    m.cost_components_annual.append('ice_fuel_cost')
+    # (not used because it interferes with calculation of cost per kWh for electricity)
+    # m.cost_components_annual.append('ev_extra_annual_cost')
+    # m.cost_components_annual.append('ice_fuel_cost')
 
     # calculate the amount of EV energy to provide during each timeseries
     # (assuming that total EV energy requirements are the same every day)
@@ -54,8 +55,11 @@ def define_components(m):
     m.ChargeEVs = Var(m.LOAD_ZONES, m.TIMEPOINTS, within=NonNegativeReals)
     
     # make sure to charge all EVs
+    # NOTE: prior to 2016-01-14, this failed to account for multi-hour timepoints,
+    # so, e.g., it would double the average load if the timepoints were 2 hours long
     m.ChargeEVs_min = Constraint(m.LOAD_ZONES, m.TIMESERIES, rule=lambda m, z, ts:
-        sum(m.ChargeEVs[z, tp] for tp in m.TS_TPS[ts]) == m.ev_mwh_ts[z, ts]
+        sum(m.ChargeEVs[z, tp] for tp in m.TS_TPS[ts]) * m.ts_duration_of_tp[ts] 
+        == m.ev_mwh_ts[z, ts]
     )
 
     # add the EV load to the model's energy balance
