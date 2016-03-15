@@ -4,6 +4,10 @@ from pyomo.environ import *
 import switch_mod.utilities as utilities
 from util import get
 
+def define_arguments(argparser):
+    argparser.add_argument('--biofuel_limit', type=float, default=0.05, 
+        help="Maximum fraction of power that can be obtained from biofuel in any period (default=0.05)")
+    
 def define_components(m):
     """
 
@@ -29,7 +33,7 @@ def define_components(m):
     # maximum share of (bio)fuels in rps
     # note: using Infinity as the upper limit causes the solution to take forever
     # m.rps_fuel_limit = Param(default=float("inf"), mutable=True)
-    m.rps_fuel_limit = Param(default=1.0, mutable=True)
+    m.rps_fuel_limit = Param(initialize=m.options.biofuel_limit, mutable=True)
 
     # Note: this rule ignores pumped hydro, so it could be gamed by producing extra 
     # RPS-eligible power and burning it off in storage losses; on the other hand, 
