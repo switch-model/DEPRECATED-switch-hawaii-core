@@ -162,49 +162,47 @@ def write_tables(**args):
     else:
         inflator = '1.0'
 
-    # simple fuel markets with no LNG expansion options (used by historical models)
-    # (use fuel_cost module)
-    # note: if there are multiple tiers for a fuel in the fuel_costs table,
-    # this will pull them all, with the same fuel name, so it is not recommended
-    # for use with the EIA forecasts with LNG (i.e., mostly not recommended for use)
-    # TODO: get monthly fuel costs from Karl Jandoc spreadsheet
-    write_table('fuel_cost.tab', """
-        SELECT load_zone, fuel_type as fuel, period,
-            price_mmbtu * {inflator} as fuel_cost
-        FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
-        WHERE load_zone in %(load_zones)s
-            AND fuel_scen_id = %(fuel_scen_id)s
-            AND p.time_sample = %(time_sample)s
-        ORDER BY 1, 2, 3;
-    """.format(inflator=inflator), args)
+    if args.get("use_simple_fuel_costs", False):
+        # simple fuel markets with no bulk LNG expansion option
+        # (use fuel_cost module)
+        # TODO: get monthly fuel costs from Karl Jandoc spreadsheet
+        write_table('fuel_cost.tab', """
+            SELECT load_zone, fuel_type as fuel, period,
+                price_mmbtu * {inflator} as fuel_cost
+            FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
+            WHERE load_zone in %(load_zones)s
+                AND fuel_scen_id = %(fuel_scen_id)s
+                AND p.time_sample = %(time_sample)s
+                AND NOT (fuel_type='LNG' AND tier='bulk')
+            ORDER BY 1, 2, 3;
+        """.format(inflator=inflator), args)
+    else:
+        # advanced fuel markets with LNG expansion options (used by forward-looking models)
+        # (use fuel_markets module)
+        write_table('regional_fuel_markets.tab', """
+            SELECT DISTINCT concat('Hawaii_', fuel_type) AS regional_fuel_market, fuel_type AS fuel 
+            FROM fuel_costs
+            WHERE load_zone in %(load_zones)s AND fuel_scen_id = %(fuel_scen_id)s;
+        """, args)
 
-    # advanced fuel markets with LNG expansion options (used by forward-looking models)
-    # (use fuel_markets module)
-    write_table('regional_fuel_markets.tab', """
-        SELECT DISTINCT concat('Hawaii_', fuel_type) AS regional_fuel_market, fuel_type AS fuel 
-        FROM fuel_costs
-        WHERE load_zone in %(load_zones)s AND fuel_scen_id = %(fuel_scen_id)s;
-    """, args)
+        write_table('fuel_supply_curves.tab', """
+            SELECT concat('Hawaii_', fuel_type) as regional_fuel_market, fuel_type as fuel, 
+                period, tier, price_mmbtu * {inflator} as unit_cost,
+                %(bulk_lng_limit)s AS max_avail_at_cost,
+                CASE WHEN fuel_type='LNG' AND tier='bulk' THEN %(bulk_lng_fixed_cost)s ELSE 0.0 END
+                    AS fixed_cost
+            FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
+            WHERE load_zone in %(load_zones)s
+                AND fuel_scen_id = %(fuel_scen_id)s
+                AND p.time_sample = %(time_sample)s
+            ORDER BY 1, 2, 3;
+        """.format(inflator=inflator), args)
 
-    write_table('fuel_supply_curves.tab', """
-        SELECT concat('Hawaii_', fuel_type) as regional_fuel_market, fuel_type as fuel, 
-            period,
-            tier, 
-            price_mmbtu * {inflator} as unit_cost,
-            CASE WHEN fuel_type='LNG' AND tier='bulk' THEN %(bulk_lng_limit)s ELSE NULL END AS max_avail_at_cost,
-            CASE WHEN fuel_type='LNG' AND tier='bulk' THEN %(bulk_lng_fixed_cost)s ELSE 0.0 END AS fixed_cost
-        FROM fuel_costs c JOIN study_periods p ON (c.year=p.period)
-        WHERE load_zone in %(load_zones)s
-            AND fuel_scen_id = %(fuel_scen_id)s
-            AND p.time_sample = %(time_sample)s
-        ORDER BY 1, 2, 3;
-    """.format(inflator=inflator), args)
-
-    write_table('lz_to_regional_fuel_market.tab', """
-        SELECT DISTINCT load_zone, concat('Hawaii_', fuel_type) AS regional_fuel_market 
-        FROM fuel_costs 
-        WHERE load_zone in %(load_zones)s AND fuel_scen_id = %(fuel_scen_id)s;
-    """, args)
+        write_table('lz_to_regional_fuel_market.tab', """
+            SELECT DISTINCT load_zone, concat('Hawaii_', fuel_type) AS regional_fuel_market 
+            FROM fuel_costs 
+            WHERE load_zone in %(load_zones)s AND fuel_scen_id = %(fuel_scen_id)s;
+        """, args)
 
     # TODO: (when multi-island) add fuel_cost_adders for each zone
 
